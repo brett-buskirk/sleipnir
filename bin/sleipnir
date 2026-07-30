@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# sleipnir — a fast doctl wrapper for navigating your DigitalOcean estate.
+# Odin's eight-legged steed: the swift mount that carries you across the realms.
+#
+# STATUS: scaffold. The command harness (dispatch, preflight, config, help) is
+# here; the read-first subcommands are stubbed — see CLAUDE.md for the build brief.
+#
+# Design floor (CLAUDE.md has the full version):
+#   • Thin wrapper over `doctl` — never talks to the DO API directly.
+#   • doctl owns auth; sleipnir NEVER handles the DO token.
+#   • Interactive ops only; standing infra stays in Terraform/Ansible.
+
+set -euo pipefail
+
+readonly SLEIPNIR_VERSION="0.1.0"
+readonly PROG="${0##*/}"
+
+# --- config ----------------------------------------------------------------
+# Sourced if present. Keep it SECRET-FREE — doctl owns auth. See
+# sleipnir.config.example for the shape.
+SLEIPNIR_CONFIG="${SLEIPNIR_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/sleipnir/config}"
+# Defaults (overridable in config, or via the environment)
+: "${SLEIPNIR_REGION:=nyc3}"
+: "${SLEIPNIR_SSH_USER:=root}"
+# shellcheck source=/dev/null
+[ -f "$SLEIPNIR_CONFIG" ] && source "$SLEIPNIR_CONFIG"
+
+# --- helpers ---------------------------------------------------------------
+die()  { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
+todo() { die "'$1' is not implemented yet — see CLAUDE.md (the v1 build brief)."; }
+
+# Preflight: dependencies + doctl auth. Call before any doctl-backed command.
+require_doctl() {
+  command -v doctl >/dev/null 2>&1 \
+    || die "doctl not found — install it first (https://docs.digitalocean.com/reference/doctl/)."
+  command -v jq >/dev/null 2>&1 \
+    || die "jq not found — install it first."
+  doctl account get >/dev/null 2>&1 \
+    || die "doctl is not authenticated (or the active context is wrong). Run: doctl auth init"
+}
+
+# --- commands (v1: read + navigate) — TODO: implement per CLAUDE.md ---------
+cmd_ls()      { require_doctl; todo ls; }       # droplet table (name·ip·region·size·tags·$/mo)
+cmd_ip()      { require_doctl; todo ip; }       # print a droplet's public IPv4
+cmd_ssh()     { require_doctl; todo ssh; }      # resolve name→ip and ssh in
+cmd_survey()  { require_doctl; todo survey; }   # whole-estate view + cost tally
+cmd_apps()    { require_doctl; todo apps; }     # App Platform apps
+cmd_deploys() { require_doctl; todo deploys; }  # recent deployments for an app
+cmd_logs()    { require_doctl; todo logs; }     # tail an app's logs
+cmd_install() { todo install; }                 # write a starter config
+
+cmd_config() {
+  printf 'config file: %s\n' "$SLEIPNIR_CONFIG"
+  if [ -f "$SLEIPNIR_CONFIG" ]; then
+    printf '(loaded)\n'
+  else
+    printf '(none yet — run: %s install)\n' "$PROG"
+  fi
+}
+
+usage() {
+  cat <<EOF
+$PROG $SLEIPNIR_VERSION — a fast doctl wrapper for your DigitalOcean estate.
+
+usage: $PROG <command> [args]
+
+read + navigate (v1):
+  ls [--tag X]        list droplets — name · IP · region · size · tags · \$/mo
+  ip <name>           print a droplet's public IPv4
+  ssh <name> [-- …]   ssh into a droplet by name
+  survey              whole-estate view (droplets · apps · spaces · dbs · fw) + cost
+  apps                list App Platform apps
+  deploys <app>       recent deployments for an app
+  logs <app>          tail an app's logs
+
+meta:
+  config              show the resolved config path
+  install             write a starter config
+  help [cmd]          this help
+  version             print version
+
+doctl owns authentication; $PROG never handles your DO token.
+Full build brief: CLAUDE.md
+EOF
+}
+
+main() {
+  local cmd="${1:-help}"
+  shift || true
+  case "$cmd" in
+    ls)                   cmd_ls "$@" ;;
+    ip)                   cmd_ip "$@" ;;
+    ssh)                  cmd_ssh "$@" ;;
+    survey)               cmd_survey "$@" ;;
+    apps)                 cmd_apps "$@" ;;
+    deploys)              cmd_deploys "$@" ;;
+    logs)                 cmd_logs "$@" ;;
+    config)               cmd_config "$@" ;;
+    install)              cmd_install "$@" ;;
+    help | -h | --help)   usage ;;
+    version | -v | --version) printf '%s %s\n' "$PROG" "$SLEIPNIR_VERSION" ;;
+    *) die "unknown command '$cmd' — try '$PROG help'." ;;
+  esac
+}
+
+main "$@"

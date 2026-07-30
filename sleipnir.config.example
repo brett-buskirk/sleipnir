@@ -1,0 +1,25 @@
+# sleipnir config — copy to $SLEIPNIR_CONFIG
+#   (default: ${XDG_CONFIG_HOME:-~/.config}/sleipnir/config) and edit.
+# `sleipnir install` will scaffold this for you.
+#
+# Plain shell assignments, sourced by sleipnir at startup. Keep it SECRET-FREE:
+# doctl owns your DO API token — sleipnir never does. This file holds only
+# defaults and profiles.
+
+# Defaults for new resources / connections
+SLEIPNIR_REGION="nyc3"
+SLEIPNIR_IMAGE="debian-13-x64"
+SLEIPNIR_SIZE="s-1vcpu-1gb"
+SLEIPNIR_SSH_USER="root"
+
+# SSH key fingerprint(s) for doctl to attach on create (v2+).
+# Get them with:  doctl compute ssh-key list
+# These are public-key fingerprints, not secrets — but still kept local, not committed.
+SLEIPNIR_SSH_KEYS=""
+
+# Default tag(s) sleipnir stamps on resources it creates (v2+)
+SLEIPNIR_TAGS="sleipnir"
+
+# Droplet profiles for `sleipnir summon <name> --profile <p>` (v2+).
+# Example — a throwaway test box mirroring the ansible-baseline harness:
+# SLEIPNIR_PROFILE_test="--image debian-13-x64 --size s-1vcpu-1gb --region nyc3 --tag-name test"
