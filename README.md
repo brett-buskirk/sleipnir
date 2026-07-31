@@ -5,19 +5,34 @@
 doctl invocations into short verbs with sane defaults. The DigitalOcean-side companion to the GitHub
 "pack" (huginn · muninn · geri · freki · grimnir).
 
-> **Status:** scaffold. The command harness (dispatch, preflight, config, help) is in place; the
-> read-first commands are being built. Build brief for the agent: [`CLAUDE.md`](CLAUDE.md).
+> **Status:** v1 in progress — the droplet verbs (`ls`, `ip`) and `config` are live; the rest of the
+> read-first surface is being built. See the [ROADMAP](ROADMAP.md), or
+> [`CHEATSHEET.md`](CHEATSHEET.md) for full reference on what ships today.
 
 ## What it does (v1 — read + navigate)
 
-| Command | What it does |
-| ------- | ------------ |
-| `sleipnir ls [--tag X]` | Droplet table — name · IP · region · size · tags · est. $/mo |
-| `sleipnir ip <name>` | Just the public IPv4 of a droplet (for ssh / ansible) |
-| `sleipnir ssh <name>` | SSH into a droplet by name |
-| `sleipnir survey` | Whole-estate view — droplets, apps, Spaces, DBs, firewalls + a cost tally |
-| `sleipnir apps` / `deploys <app>` / `logs <app>` | App Platform |
-| `sleipnir config` / `install` | Print or write the local config |
+| Command | What it does | |
+| ------- | ------------ |-|
+| `sleipnir ls [--tag X] [--region Y]` | Droplet table — name · IP · region · size · tags · est. $/mo | ✅ |
+| `sleipnir ip <name>` | Just the public IPv4 of a droplet (for ssh / ansible) | ✅ |
+| `sleipnir config` | Resolved config + the active doctl context | ✅ |
+| `sleipnir ssh <name>` | SSH into a droplet by name | |
+| `sleipnir survey` | Whole-estate view — droplets, apps, Spaces, DBs, firewalls + a cost tally | |
+| `sleipnir apps` / `deploys <app>` / `logs <app>` | App Platform | |
+| `sleipnir install` | Write a starter config | |
+
+```console
+$ sleipnir ls
+
+  droplets  · Brett Buskirk LLC · context brett
+
+  rootroute-staging  64.225.22.218    nyc3  s-2vcpu-2gb  $18/mo  active  staging,web,rootroute
+  vor-analytics      165.227.123.156  nyc3  s-2vcpu-4gb  $24/mo  active  plausible,analytics,vor
+
+  2 droplets  · ~$42/mo
+
+$ ssh root@$(sleipnir ip vor-analytics)
+```
 
 ## How it works
 
@@ -25,6 +40,11 @@ Bash + `doctl` + `jq`. Sleipnir **shells out to doctl** — which owns authentic
 result. It never talks to the DO API directly and **never handles your DO token.** Defaults (region, size,
 image, SSH keys, tags, droplet profiles) live in local config; see
 [`sleipnir.config.example`](sleipnir.config.example).
+
+**The active context is always visible.** doctl has named contexts the way `gh` has accounts, and hitting
+the wrong one is the same class of mistake as pushing as the wrong GitHub user. Estate-wide views carry a
+header naming the account and context the numbers came from, so "which account am I about to hit?" is
+never a guess.
 
 **Scope boundary:** Sleipnir is for *interactive ops and inspection* — quick fetches, throwaway droplets,
 checking what's running and what it costs, tailing a deploy. Standing, reproducible infrastructure stays in
