@@ -6,7 +6,7 @@ _What's planned for sleipnir — check items off as they ship._
 - [x] `ls` — droplet table (name · IP · region · size · tags · $/mo)
 - [x] `ip <name>` — print a droplet's public IPv4
 - [x] `ssh <name>` — ssh into a droplet by name
-- [ ] `survey` — whole-estate view + rough monthly cost tally
+- [x] `survey` — whole-estate view + rough monthly cost tally
 - [x] `apps` / `deploys <app>` / `logs <app>` — App Platform
 - [x] `config` — show the resolved config + active doctl context
 - [x] `install` — write a starter config

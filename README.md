@@ -5,9 +5,9 @@
 doctl invocations into short verbs with sane defaults. The DigitalOcean-side companion to the GitHub
 "pack" (huginn · muninn · geri · freki · grimnir).
 
-> **Status:** v1 in progress — the droplet verbs (`ls`, `ip`) and `config` are live; the rest of the
-> read-first surface is being built. See the [ROADMAP](ROADMAP.md), or
-> [`CHEATSHEET.md`](CHEATSHEET.md) for full reference on what ships today.
+> **Status:** **v1 is complete** — the whole read + navigate surface works against a real doctl-authed
+> account. Next is v2 (safe composites: `summon`, `open`). See the [ROADMAP](ROADMAP.md), or
+> [`CHEATSHEET.md`](CHEATSHEET.md) for the full command reference.
 
 ## What it does (v1 — read + navigate)
 
@@ -18,7 +18,7 @@ doctl invocations into short verbs with sane defaults. The DigitalOcean-side com
 | `sleipnir ssh <name> [-- <args>]` | SSH into a droplet by name | ✅ |
 | `sleipnir config` / `install` | Show the resolved config, or write a starter one | ✅ |
 | `sleipnir apps` / `deploys <app>` / `logs <app>` | App Platform — apps, deploy history, logs | ✅ |
-| `sleipnir survey` | Whole-estate view — droplets, apps, Spaces, DBs, firewalls + a cost tally | |
+| `sleipnir survey` | Whole-estate view — droplets, apps, volumes, firewalls + a cost tally | ✅ |
 
 ```console
 $ sleipnir ls

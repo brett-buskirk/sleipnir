@@ -6,7 +6,17 @@ All notable changes to sleipnir are documented here. The format is based on
 
 ## [Unreleased]
 
+_The v1 surface (read + navigate) is now complete._
+
 ### Added
+- `survey` — the whole-estate view: droplets, apps, volumes, and firewalls in detail, plus counts of
+  reserved IPs, databases, load balancers, and Kubernetes clusters, with an estimated monthly cost.
+  Supports `--json`.
+- `SLEIPNIR_VOLUME_PRICE_GIB` (default `0.10`) — block-storage price per GiB/month. doctl reports a
+  droplet's price but not a volume's, so this is the one figure sleipnir must be told; it lives in
+  config so it can be corrected when pricing moves.
+- `survey` distinguishes **none** (doctl answered; nothing there) from **unknown** (the lookup failed),
+  and states plainly when a failed *priced* lookup has left the total an undercount.
 - `apps` — App Platform table (name · phase · time since last deploy · components · region · tier ·
   live URL), with `--json`.
 - `deploys <app>` — recent deployments, newest first, with `-n` and `--json`. Takes an app *name*;
