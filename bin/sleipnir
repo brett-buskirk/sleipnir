@@ -2,104 +2,356 @@
 # sleipnir — a fast doctl wrapper for navigating your DigitalOcean estate.
 # Odin's eight-legged steed: the swift mount that carries you across the realms.
 #
-# STATUS: scaffold. The command harness (dispatch, preflight, config, help) is
-# here; the read-first subcommands are stubbed — see CLAUDE.md for the build brief.
+#   sleipnir ls | ip | ssh | survey | apps | deploys | logs | config | install
+#   run 'sleipnir help' for the menu, or 'sleipnir <command> help' for one command.
 #
 # Design floor (CLAUDE.md has the full version):
 #   • Thin wrapper over `doctl` — never talks to the DO API directly.
-#   • doctl owns auth; sleipnir NEVER handles the DO token.
+#   • doctl owns auth; sleipnir NEVER reads, stores, or logs the DO token.
 #   • Interactive ops only; standing infra stays in Terraform/Ansible.
+#
+# Deps: bash + doctl + jq. Every doctl-backed command sits behind require_doctl,
+# so the meta commands (help/version/config) still work on a machine with no
+# doctl account at all.
+# shellcheck disable=SC2059  # color vars are fixed ANSI codes, deliberately embedded in format strings
+set -uo pipefail
 
-set -euo pipefail
+VERSION="0.1.0"
+PROG="${0##*/}"
 
-readonly SLEIPNIR_VERSION="0.1.0"
-readonly PROG="${0##*/}"
-
-# --- config ----------------------------------------------------------------
-# Sourced if present. Keep it SECRET-FREE — doctl owns auth. See
-# sleipnir.config.example for the shape.
-SLEIPNIR_CONFIG="${SLEIPNIR_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/sleipnir/config}"
-# Defaults (overridable in config, or via the environment)
-: "${SLEIPNIR_REGION:=nyc3}"
-: "${SLEIPNIR_SSH_USER:=root}"
+# ── configuration — env > config file > defaults ──────────────────────────────
+# Sourced if present. Keep it SECRET-FREE: doctl owns auth, so this file holds
+# only defaults and profiles. See sleipnir.config.example for the shape.
+CONFIG="${SLEIPNIR_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/sleipnir/config}"
+# Snapshot the environment before sourcing, so an explicit SLEIPNIR_* env var
+# still beats the config file (the pack's precedence: env > file > default).
+_env_REGION="${SLEIPNIR_REGION-}"
+_env_SSH_USER="${SLEIPNIR_SSH_USER-}"
 # shellcheck source=/dev/null
-[ -f "$SLEIPNIR_CONFIG" ] && source "$SLEIPNIR_CONFIG"
+[ -f "$CONFIG" ] && . "$CONFIG"
+REGION="${_env_REGION:-${SLEIPNIR_REGION:-nyc3}}"
+SSH_USER="${_env_SSH_USER:-${SLEIPNIR_SSH_USER:-root}}"
 
-# --- helpers ---------------------------------------------------------------
-die()  { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
-todo() { die "'$1' is not implemented yet — see CLAUDE.md (the v1 build brief)."; }
+# ── palette — color only on a TTY, and never when NO_COLOR is set ─────────────
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  R=$'\e[31m'; G=$'\e[32m'; Y=$'\e[33m'; C=$'\e[36m'; DIM=$'\e[2m'; BD=$'\e[1m'; X=$'\e[0m'
+else R=; G=; Y=; C=; DIM=; BD=; X=; fi
 
-# Preflight: dependencies + doctl auth. Call before any doctl-backed command.
-require_doctl() {
-  command -v doctl >/dev/null 2>&1 \
-    || die "doctl not found — install it first (https://docs.digitalocean.com/reference/doctl/)."
-  command -v jq >/dev/null 2>&1 \
-    || die "jq not found — install it first."
-  doctl account get >/dev/null 2>&1 \
-    || die "doctl is not authenticated (or the active context is wrong). Run: doctl auth init"
+# ── small helpers ─────────────────────────────────────────────────────────────
+have(){ command -v "$1" >/dev/null 2>&1; }
+is_help(){ case "${1:-}" in help|-h|--help) return 0;; *) return 1;; esac; }
+die(){ printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
+warn(){ printf '%s: %s\n' "$PROG" "$*" >&2; }
+
+# ── the active context — "which account am I about to hit?" ───────────────────
+# doctl has named contexts the way gh has accounts, and hitting the wrong one is
+# the DO analog of pushing as the wrong GitHub user. Both lookups are memoized so
+# a run costs at most one extra API call, and both degrade to "" rather than
+# failing a command over a cosmetic header.
+CONTEXT=""; CONTEXT_SET=0
+do_context(){
+  [ "$CONTEXT_SET" = 1 ] || {
+    CONTEXT="$(doctl auth list 2>/dev/null | sed -n 's/ (current)$//p' | head -1)"
+    CONTEXT_SET=1
+  }
+  printf '%s' "$CONTEXT"
 }
 
-# --- commands (v1: read + navigate) — TODO: implement per CLAUDE.md ---------
-cmd_ls()      { require_doctl; todo ls; }       # droplet table (name·ip·region·size·tags·$/mo)
-cmd_ip()      { require_doctl; todo ip; }       # print a droplet's public IPv4
-cmd_ssh()     { require_doctl; todo ssh; }      # resolve name→ip and ssh in
-cmd_survey()  { require_doctl; todo survey; }   # whole-estate view + cost tally
-cmd_apps()    { require_doctl; todo apps; }     # App Platform apps
-cmd_deploys() { require_doctl; todo deploys; }  # recent deployments for an app
-cmd_logs()    { require_doctl; todo logs; }     # tail an app's logs
-cmd_install() { todo install; }                 # write a starter config
-
-cmd_config() {
-  printf 'config file: %s\n' "$SLEIPNIR_CONFIG"
-  if [ -f "$SLEIPNIR_CONFIG" ]; then
-    printf '(loaded)\n'
-  else
-    printf '(none yet — run: %s install)\n' "$PROG"
+ACCOUNT_JSON=""; ACCOUNT_RC=-1
+account_json(){
+  if [ "$ACCOUNT_RC" -lt 0 ]; then
+    ACCOUNT_JSON="$(doctl account get --output json 2>/dev/null)"; ACCOUNT_RC=$?
+    jq -e 'type == "object"' >/dev/null 2>&1 <<<"$ACCOUNT_JSON" || { ACCOUNT_JSON='{}'; ACCOUNT_RC=1; }
   fi
+  printf '%s' "$ACCOUNT_JSON"
+  return "$ACCOUNT_RC"
 }
 
-usage() {
-  cat <<EOF
-$PROG $SLEIPNIR_VERSION — a fast doctl wrapper for your DigitalOcean estate.
+# Team name for the header — falls back to the account email, then to nothing.
+account_label(){ account_json 2>/dev/null | jq -r '.team.name // .email // empty' 2>/dev/null; }
 
-usage: $PROG <command> [args]
-
-read + navigate (v1):
-  ls [--tag X]        list droplets — name · IP · region · size · tags · \$/mo
-  ip <name>           print a droplet's public IPv4
-  ssh <name> [-- …]   ssh into a droplet by name
-  survey              whole-estate view (droplets · apps · spaces · dbs · fw) + cost
-  apps                list App Platform apps
-  deploys <app>       recent deployments for an app
-  logs <app>          tail an app's logs
-
-meta:
-  config              show the resolved config path
-  install             write a starter config
-  help [cmd]          this help
-  version             print version
-
-doctl owns authentication; $PROG never handles your DO token.
-Full build brief: CLAUDE.md
-EOF
+# The one-line "you are here" banner every estate-wide view carries.
+context_line(){
+  local acct ctx out=""
+  acct="$(account_label)"; ctx="$(do_context)"
+  [ -n "$acct" ] && out="$acct"
+  [ -n "$ctx" ] && out="${out:+$out · }context $ctx"
+  printf '%s' "$out"
 }
 
-main() {
+# ── preflight — dependencies + doctl auth ─────────────────────────────────────
+# Call before any doctl-backed command. Returns non-zero (rather than exiting) so
+# callers unwind normally and the process exit code still reflects the failure.
+require_doctl(){
+  have doctl || die "doctl not found — install it first (https://docs.digitalocean.com/reference/doctl/)."
+  have jq    || die "jq not found — install it first."
+  account_json >/dev/null 2>&1 && return 0
+  local ctx; ctx="$(do_context)"
+  printf "  ${R}doctl is not authenticated${X}%s\n" "${ctx:+ ${DIM}(active context: $ctx)${X}}" >&2
+  printf "  ${DIM}run  doctl auth init  — or switch context:  doctl auth switch --context <name>${X}\n" >&2
+  return 1
+}
+
+# ── droplet inventory ─────────────────────────────────────────────────────────
+# Memoized: one `doctl compute droplet list` per run, shared by ls / ip / ssh.
+# Returns non-zero when doctl itself failed, so callers can tell "couldn't ask"
+# apart from "nothing there" — an empty account and a broken token must not look
+# the same.
+DROPLETS_JSON=""; DROPLETS_RC=-1
+droplets_json(){
+  if [ "$DROPLETS_RC" -lt 0 ]; then
+    local raw
+    raw="$(doctl compute droplet list --output json 2>&1)"; DROPLETS_RC=$?
+    if [ "$DROPLETS_RC" -ne 0 ]; then
+      warn "doctl could not list droplets — $(head -1 <<<"$raw")"
+      DROPLETS_JSON='[]'
+    elif jq -e 'type == "array"' >/dev/null 2>&1 <<<"$raw"; then
+      DROPLETS_JSON="$raw"
+    else
+      DROPLETS_JSON='[]'   # doctl emits `null`, not `[]`, for an empty account
+    fi
+  fi
+  printf '%s' "$DROPLETS_JSON"
+  return "$DROPLETS_RC"
+}
+
+# Flatten doctl's droplet objects to the fields sleipnir shows. Kept in one place
+# so the human table and --json can never drift apart. A droplet with no public
+# interface (private-only) yields an empty .ip rather than dropping out.
+# shellcheck disable=SC2016  # $tag/$region are jq variables bound with --arg, not shell expansions
+DROPLET_SELECT='
+  [ .[] | {
+      name:   (.name // ""),
+      ip:     (((.networks.v4 // []) | map(select(.type == "public")) | .[0].ip_address) // ""),
+      region: (.region.slug // ""),
+      size:   (.size_slug // ""),
+      price:  (.size.price_monthly // null),
+      tags:   (.tags // []),
+      status: (.status // "")
+  } ]
+  | map(select($tag == "" or (.tags | index($tag))))
+  | map(select($region == "" or .region == $region))
+  | sort_by(.name)'
+
+# ── ls ────────────────────────────────────────────────────────────────────────
+cmd_ls(){
+  is_help "${1:-}" && { help_ls; return 0; }
+  local tag="" region="" as_json=0
+  while [ $# -gt 0 ]; do case "$1" in
+    --tag)    shift; tag="${1:-}";;
+    --region) shift; region="${1:-}";;
+    --json)   as_json=1;;
+    -*) warn "ignoring unknown option: $1";;
+    *)  warn "ignoring unexpected argument: $1";;
+  esac; shift || true; done
+
+  require_doctl || return 1
+  local json; json="$(droplets_json)"; local rc=$?
+
+  if [ "$as_json" = 1 ]; then
+    jq --arg tag "$tag" --arg region "$region" "$DROPLET_SELECT" <<<"$json"
+    return "$rc"
+  fi
+  [ "$rc" -ne 0 ] && return "$rc"
+
+  local rows
+  rows="$(jq -r --arg tag "$tag" --arg region "$region" \
+    "$DROPLET_SELECT | .[] | [.name, .ip, .region, .size, (.price // \"\"), (.tags | join(\",\")), .status] | @tsv" \
+    <<<"$json")"
+
+  local filters=""
+  [ -n "$tag" ]    && filters=" ${DIM}· tag $tag${X}"
+  [ -n "$region" ] && filters="$filters ${DIM}· region $region${X}"
+  printf "\n  ${BD}droplets${X}  ${DIM}· %s${X}%s\n\n" "$(context_line)" "$filters"
+
+  if [ -z "$rows" ]; then
+    printf "  ${DIM}no droplets%s.${X}\n\n" "$([ -n "$tag$region" ] && printf ' match that filter')"
+    return 0
+  fi
+
+  # Width pass first: printf (not `column -t`) does the alignment, because column
+  # counts ANSI escapes as printable characters and skews every colored row.
+  local name ip region_s size price tags status
+  local w_name=4 w_ip=2 w_region=6 w_size=4
+  while IFS=$'\t' read -r name ip region_s size price tags status; do
+    [ "${#name}" -gt "$w_name" ]     && w_name="${#name}"
+    [ "${#ip}" -gt "$w_ip" ]         && w_ip="${#ip}"
+    [ "${#region_s}" -gt "$w_region" ] && w_region="${#region_s}"
+    [ "${#size}" -gt "$w_size" ]     && w_size="${#size}"
+  done <<<"$rows"
+
+  local n=0 total=0 scolor
+  while IFS=$'\t' read -r name ip region_s size price tags status; do
+    [ -z "$name" ] && continue
+    case "$status" in
+      active)      scolor="$G";;
+      new)         scolor="$Y";;
+      off|archive) scolor="$DIM";;
+      *)           scolor="$R";;
+    esac
+    printf "  ${C}%-*s${X}  %-*s  ${DIM}%-*s${X}  %-*s  %8s  ${scolor}%-8s${X}  ${DIM}%s${X}\n" \
+      "$w_name" "$name" \
+      "$w_ip" "${ip:-—}" \
+      "$w_region" "$region_s" \
+      "$w_size" "$size" \
+      "$([ -n "$price" ] && printf '$%s/mo' "$price" || printf '—')" \
+      "$status" \
+      "${tags:-—}"
+    n=$((n + 1))
+    [ -n "$price" ] && total="$(awk -v a="$total" -v b="$price" 'BEGIN{printf "%.2f", a + b}')"
+  done <<<"$rows"
+
+  printf "\n  ${BD}%d droplet%s${X}  ${DIM}· ~\$%s/mo${X}\n\n" \
+    "$n" "$([ "$n" = 1 ] || printf 's')" "$(awk -v t="$total" 'BEGIN{printf (t == int(t)) ? "%d" : "%.2f", t}')"
+}
+
+# ── ip ────────────────────────────────────────────────────────────────────────
+# Resolve a droplet name to its public IPv4 on stdout. Everything else goes to
+# stderr so `ssh root@$(sleipnir ip web)` is safe to embed. Exact match first,
+# then a case-insensitive retry; anything ambiguous is an error, never a guess.
+droplet_ip(){
+  local name="$1" json matches ips
+  json="$(droplets_json)" || return 1
+
+  matches="$(jq -r --arg n "$name" '[.[] | select(.name == $n)] | length' <<<"$json")"
+  [ "$matches" = 0 ] && matches="$(jq -r --arg n "$name" \
+    '[.[] | select((.name | ascii_downcase) == ($n | ascii_downcase))] | length' <<<"$json")"
+
+  if [ "$matches" = 0 ]; then
+    printf "  ${R}no droplet named '%s'${X} ${DIM}· %s${X}\n" "$name" "$(context_line)" >&2
+    local near
+    near="$(jq -r --arg n "$name" \
+      '[.[] | select(.name | ascii_downcase | contains($n | ascii_downcase)) | .name] | join(", ")' <<<"$json")"
+    [ -n "$near" ] && printf "  ${DIM}did you mean: %s${X}\n" "$near" >&2
+    printf "  ${DIM}list them all:  %s ls${X}\n" "$PROG" >&2
+    return 1
+  fi
+  if [ "$matches" -gt 1 ]; then
+    printf "  ${R}'%s' matches %s droplets${X} ${DIM}· %s${X}\n" "$name" "$matches" "$(context_line)" >&2
+    printf "  ${DIM}DigitalOcean allows duplicate names — rename one, or act by ID with doctl.${X}\n" >&2
+    return 1
+  fi
+
+  ips="$(jq -r --arg n "$name" \
+    '.[] | select((.name | ascii_downcase) == ($n | ascii_downcase))
+         | ((.networks.v4 // []) | map(select(.type == "public")) | .[0].ip_address) // ""' <<<"$json")"
+  if [ -z "$ips" ]; then
+    printf "  ${R}'%s' has no public IPv4${X} ${DIM}(private-only droplet)${X}\n" "$name" >&2
+    return 1
+  fi
+  printf '%s\n' "$ips"
+}
+
+cmd_ip(){
+  is_help "${1:-}" && { help_ip; return 0; }
+  local name="${1:-}"
+  [ -n "$name" ] || { printf "  ${R}usage:${X} $PROG ip <droplet-name>\n" >&2; return 1; }
+  require_doctl || return 1
+  droplet_ip "$name"
+}
+
+# ── config ────────────────────────────────────────────────────────────────────
+cmd_config(){
+  is_help "${1:-}" && { help_config; return 0; }
+  printf "\n  ${BD}sleipnir config${X}\n\n"
+  printf "    file        ${C}%s${X} %s\n" "$CONFIG" \
+    "$([ -f "$CONFIG" ] && printf "${G}(loaded)${X}" || printf "${DIM}(none yet — run: %s install)${X}" "$PROG")"
+  printf "    region      %s\n" "$REGION"
+  printf "    ssh user    %s\n" "$SSH_USER"
+  if have doctl; then
+    local ctx acct
+    ctx="$(do_context)"; acct="$(account_label)"
+    printf "    doctl       ${C}%s${X}\n" "${ctx:-${DIM}no context${X}}"
+    printf "    account     %s\n" "${acct:-${DIM}not authenticated${X}}"
+  else
+    printf "    doctl       ${Y}not installed${X}\n"
+  fi
+  printf "\n  ${DIM}SLEIPNIR_* environment variables override the file. doctl owns your DO\n"
+  printf "  token — sleipnir never reads, stores, or logs it.${X}\n\n"
+}
+
+# ── not yet built ─────────────────────────────────────────────────────────────
+todo(){ printf "  ${Y}'%s' is not implemented yet${X} ${DIM}· see ROADMAP.md${X}\n" "$1" >&2; return 1; }
+cmd_ssh(){     todo ssh; }
+cmd_survey(){  todo survey; }
+cmd_apps(){    todo apps; }
+cmd_deploys(){ todo deploys; }
+cmd_logs(){    todo logs; }
+cmd_install(){ todo install; }
+
+# ── help ──────────────────────────────────────────────────────────────────────
+help_ls(){
+  printf "\n  ${BD}$PROG ls${X} [--tag <tag>] [--region <slug>] [--json]\n\n"
+  printf "  Every droplet on the active account — name · public IPv4 · region · size ·\n"
+  printf "  estimated \$/mo · status · tags, with a monthly total. The header names the\n"
+  printf "  account and doctl context the numbers came from. ${DIM}(network — one API call)${X}\n\n"
+  printf "  ${BD}Options${X}\n"
+  printf "    --tag <tag>       only droplets carrying this tag\n"
+  printf "    --region <slug>   only droplets in this region (nyc3, sfo3, …)\n"
+  printf "    --json            machine-readable rows instead of the table\n\n"
+  printf "  ${DIM}Cost is doctl's list price for the size — it ignores volumes, snapshots,\n"
+  printf "  backups, and bandwidth. Treat it as a glance, not an invoice.${X}\n\n"
+}
+help_ip(){
+  printf "\n  ${BD}$PROG ip${X} <droplet-name>\n\n"
+  printf "  Print just the public IPv4 of a droplet — nothing else on stdout, so it drops\n"
+  printf "  straight into other commands. Exits non-zero if the name doesn't resolve.\n\n"
+  printf "  ${BD}Examples${X}\n"
+  printf "    ssh root@\$($PROG ip vor-analytics)\n"
+  printf "    ansible-playbook -i \"\$($PROG ip web),\" site.yml\n\n"
+  printf "  ${DIM}Matching is exact, then case-insensitive. A name that matches more than one\n"
+  printf "  droplet is an error, not a guess.${X}\n\n"
+}
+help_config(){
+  printf "\n  ${BD}$PROG config${X}\n\n"
+  printf "  Show the resolved configuration: which file was loaded, the defaults in force,\n"
+  printf "  and the doctl context + account sleipnir would act on.\n\n"
+  printf "  ${DIM}Precedence: SLEIPNIR_* environment variables > the config file > built-in\n"
+  printf "  defaults. The file holds no secrets — doctl owns your DO token.${X}\n\n"
+}
+
+usage(){
+  printf "\n  ${BD}$PROG${X} ${DIM}%s — a fast doctl wrapper for your DigitalOcean estate${X}\n\n" "$VERSION"
+  printf "  ${BD}read + navigate${X}\n"
+  printf "    ${BD}ls${X} [--tag X] [--region Y]   droplets — name · IP · region · size · \$/mo · tags\n"
+  printf "    ${BD}ip${X} <name>                   print a droplet's public IPv4\n"
+  printf "    ${DIM}ssh <name>                  ssh into a droplet by name      (not built yet)${X}\n"
+  printf "    ${DIM}survey                      whole-estate view + cost tally  (not built yet)${X}\n"
+  printf "    ${DIM}apps · deploys · logs       App Platform                    (not built yet)${X}\n\n"
+  printf "  ${BD}meta${X}\n"
+  printf "    ${BD}config${X}                      resolved config + active doctl context\n"
+  printf "    ${DIM}install                     write a starter config          (not built yet)${X}\n"
+  printf "    ${BD}help${X} [command]              this menu, or detail for one command\n"
+  printf "    ${BD}version${X}                     print the version\n\n"
+  printf "  ${DIM}doctl owns authentication; $PROG never handles your DO token.${X}\n\n"
+}
+
+cmd_help(){
+  case "${1:-}" in
+    ls)     help_ls;;
+    ip)     help_ip;;
+    config) help_config;;
+    "")     usage;;
+    *)      printf "  ${Y}no help for '%s'${X} ${DIM}— run '$PROG help' for the menu.${X}\n" "$1" >&2; return 1;;
+  esac
+}
+
+main(){
   local cmd="${1:-help}"
   shift || true
   case "$cmd" in
-    ls)                   cmd_ls "$@" ;;
-    ip)                   cmd_ip "$@" ;;
-    ssh)                  cmd_ssh "$@" ;;
-    survey)               cmd_survey "$@" ;;
-    apps)                 cmd_apps "$@" ;;
-    deploys)              cmd_deploys "$@" ;;
-    logs)                 cmd_logs "$@" ;;
-    config)               cmd_config "$@" ;;
-    install)              cmd_install "$@" ;;
-    help | -h | --help)   usage ;;
-    version | -v | --version) printf '%s %s\n' "$PROG" "$SLEIPNIR_VERSION" ;;
-    *) die "unknown command '$cmd' — try '$PROG help'." ;;
+    ls)                       cmd_ls "$@";;
+    ip)                       cmd_ip "$@";;
+    ssh)                      cmd_ssh "$@";;
+    survey)                   cmd_survey "$@";;
+    apps)                     cmd_apps "$@";;
+    deploys)                  cmd_deploys "$@";;
+    logs)                     cmd_logs "$@";;
+    config)                   cmd_config "$@";;
+    install)                  cmd_install "$@";;
+    help|-h|--help)           cmd_help "$@";;
+    version|-v|-V|--version)  printf '%s %s\n' "$PROG" "$VERSION";;
+    *) printf "  ${R}unknown command '%s'${X} ${DIM}— run '$PROG help' for the menu.${X}\n" "$cmd" >&2; return 1;;
   esac
 }
 
