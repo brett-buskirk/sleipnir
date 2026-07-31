@@ -7,6 +7,13 @@ All notable changes to sleipnir are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- `ssh <name>` — resolve a droplet name to its IP and connect as the configured user, with `-u`/`-i`
+  overrides and everything after `--` passed to `ssh` untouched. Prints the target (and the account it
+  belongs to) on stderr before handing over the terminal.
+- `install` — write a starter config `0600`, refusing to overwrite an existing one without `--force`,
+  prefilling SSH-key fingerprints from the account when doctl is authenticated.
+- `SLEIPNIR_SSH_IDENTITY` — local private key for `ssh -i`, distinct from the `SLEIPNIR_SSH_KEYS`
+  fingerprints that doctl attaches at create time.
 - `ls` — droplet table (name · public IPv4 · region · size · estimated $/mo · status · tags) with a
   monthly total, `--tag` / `--region` filters, and `--json`.
 - `ip <name>` — print just a droplet's public IPv4 on stdout, for embedding in other commands.

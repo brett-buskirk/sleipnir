@@ -12,7 +12,13 @@ SLEIPNIR_IMAGE="debian-13-x64"
 SLEIPNIR_SIZE="s-1vcpu-1gb"
 SLEIPNIR_SSH_USER="root"
 
-# SSH key fingerprint(s) for doctl to attach on create (v2+).
+# Local private key for `sleipnir ssh` — passed straight to `ssh -i`.
+# Leave blank to let ssh pick via your agent / ~/.ssh/config.
+SLEIPNIR_SSH_IDENTITY=""
+
+# SSH key FINGERPRINTS for doctl to attach on create (v2+). Note this is a
+# different thing from SLEIPNIR_SSH_IDENTITY above: that one is a private key
+# file on this machine, these are public identifiers of keys stored at DO.
 # Get them with:  doctl compute ssh-key list
 # These are public-key fingerprints, not secrets — but still kept local, not committed.
 SLEIPNIR_SSH_KEYS=""

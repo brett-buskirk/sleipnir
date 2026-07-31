@@ -5,11 +5,11 @@ _What's planned for sleipnir — check items off as they ship._
 ## v1 — read + navigate (current)
 - [x] `ls` — droplet table (name · IP · region · size · tags · $/mo)
 - [x] `ip <name>` — print a droplet's public IPv4
-- [ ] `ssh <name>` — ssh into a droplet by name
+- [x] `ssh <name>` — ssh into a droplet by name
 - [ ] `survey` — whole-estate view + rough monthly cost tally
 - [ ] `apps` / `deploys <app>` / `logs <app>` — App Platform
 - [x] `config` — show the resolved config + active doctl context
-- [ ] `install` — write a starter config
+- [x] `install` — write a starter config
 - [x] shellcheck CI
 - [x] `CHEATSHEET.md` — kept current with each command as it lands
 

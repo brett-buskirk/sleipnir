@@ -15,11 +15,10 @@ doctl invocations into short verbs with sane defaults. The DigitalOcean-side com
 | ------- | ------------ |-|
 | `sleipnir ls [--tag X] [--region Y]` | Droplet table — name · IP · region · size · tags · est. $/mo | ✅ |
 | `sleipnir ip <name>` | Just the public IPv4 of a droplet (for ssh / ansible) | ✅ |
-| `sleipnir config` | Resolved config + the active doctl context | ✅ |
-| `sleipnir ssh <name>` | SSH into a droplet by name | |
+| `sleipnir ssh <name> [-- <args>]` | SSH into a droplet by name | ✅ |
+| `sleipnir config` / `install` | Show the resolved config, or write a starter one | ✅ |
 | `sleipnir survey` | Whole-estate view — droplets, apps, Spaces, DBs, firewalls + a cost tally | |
 | `sleipnir apps` / `deploys <app>` / `logs <app>` | App Platform | |
-| `sleipnir install` | Write a starter config | |
 
 ```console
 $ sleipnir ls
@@ -31,8 +30,11 @@ $ sleipnir ls
 
   2 droplets  · ~$42/mo
 
-$ ssh root@$(sleipnir ip vor-analytics)
+$ sleipnir ssh vor-analytics
+  → root@165.227.123.156 (vor-analytics · Brett Buskirk LLC · context brett)
 ```
+
+Run `sleipnir install` once to write a starter config, then `sleipnir config` to see what's in force.
 
 ## How it works
 
