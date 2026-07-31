@@ -2,10 +2,12 @@
 
 **Sleipnir** — Odin's eight-legged steed, the swift mount across the nine realms — is a fast, opinionated
 `doctl` wrapper for navigating your **DigitalOcean** estate from the terminal. It turns long, flag-heavy
-doctl invocations into short verbs with sane defaults. The DigitalOcean-side companion to the GitHub
-"pack" (huginn · muninn · geri · freki · grimnir).
+doctl invocations into short verbs with sane defaults.
 
-> **Status:** **v1 is complete** — the whole read + navigate surface works against a real doctl-authed
+It is a **standalone CLI**: one Bash script, nothing to install alongside it, and no dependency on
+anything beyond `doctl` and `jq`.
+
+> **Status:** **v1.0.0** — the whole read + navigate surface, working against a real doctl-authenticated
 > account. Next is v2 (safe composites: `summon`, `open`). See the [ROADMAP](ROADMAP.md), or
 > [`CHEATSHEET.md`](CHEATSHEET.md) for the full command reference.
 
@@ -54,7 +56,28 @@ Terraform + Ansible (heimdall, vor, asgard), not here.
 
 ## Install
 
-_TBD — will follow the pack's install path (and Homebrew tap) once v1 lands._
+Sleipnir is a **single Bash script** — no build step, no dependencies to vendor. It needs `bash`,
+[`doctl`](https://docs.digitalocean.com/reference/doctl/), and `jq`.
+
+```sh
+git clone https://github.com/brett-buskirk/sleipnir.git
+ln -s "$PWD/sleipnir/bin/sleipnir" ~/.local/bin/sleipnir
+```
+
+A symlink means `git pull` updates the installed command. If you'd rather not track the repo, copy
+`bin/sleipnir` anywhere on your `PATH` instead — it is self-contained. (Make sure `~/.local/bin` exists
+and is on your `PATH`.)
+
+Then point doctl at your account and write a starter config:
+
+```sh
+doctl auth init      # doctl owns authentication — sleipnir never sees your token
+sleipnir install     # writes ~/.config/sleipnir/config (0600)
+sleipnir survey
+```
+
+Verify anytime with `sleipnir config`, which prints the resolved settings and the doctl context and
+account you're pointed at.
 
 ## Conventions
 

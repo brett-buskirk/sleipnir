@@ -16,7 +16,7 @@
 # shellcheck disable=SC2059  # color vars are fixed ANSI codes, deliberately embedded in format strings
 set -uo pipefail
 
-VERSION="0.1.0"
+VERSION="1.0.0"
 PROG="${0##*/}"
 
 # ── configuration — env > config file > defaults ──────────────────────────────
