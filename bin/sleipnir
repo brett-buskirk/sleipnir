@@ -27,10 +27,15 @@ CONFIG="${SLEIPNIR_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/sleipnir/config}"
 # still beats the config file (the pack's precedence: env > file > default).
 _env_REGION="${SLEIPNIR_REGION-}"
 _env_SSH_USER="${SLEIPNIR_SSH_USER-}"
+_env_SSH_IDENTITY="${SLEIPNIR_SSH_IDENTITY-}"
 # shellcheck source=/dev/null
 [ -f "$CONFIG" ] && . "$CONFIG"
 REGION="${_env_REGION:-${SLEIPNIR_REGION:-nyc3}}"
 SSH_USER="${_env_SSH_USER:-${SLEIPNIR_SSH_USER:-root}}"
+# A local private-key path for `ssh -i`. Deliberately NOT the same thing as
+# SLEIPNIR_SSH_KEYS, which holds public-key *fingerprints* for doctl to attach at
+# create time (v2). One is a file on this machine, the other is an ID at DO.
+SSH_IDENTITY="${_env_SSH_IDENTITY:-${SLEIPNIR_SSH_IDENTITY:-}}"
 
 # ── palette — color only on a TTY, and never when NO_COLOR is set ─────────────
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -258,6 +263,7 @@ cmd_config(){
     "$([ -f "$CONFIG" ] && printf "${G}(loaded)${X}" || printf "${DIM}(none yet — run: %s install)${X}" "$PROG")"
   printf "    region      %s\n" "$REGION"
   printf "    ssh user    %s\n" "$SSH_USER"
+  printf "    ssh key     %s\n" "${SSH_IDENTITY:-${DIM}(ssh decides)${X}}"
   if have doctl; then
     local ctx acct
     ctx="$(do_context)"; acct="$(account_label)"
@@ -270,14 +276,112 @@ cmd_config(){
   printf "  token — sleipnir never reads, stores, or logs it.${X}\n\n"
 }
 
+# ── ssh ───────────────────────────────────────────────────────────────────────
+# Resolve a droplet name to its IP and hand the terminal to ssh. Everything after
+# `--` goes to ssh untouched, so the usual escape hatches (-L, -A, a remote
+# command) all still work:  sleipnir ssh web -- -L 8080:localhost:80
+cmd_ssh(){
+  is_help "${1:-}" && { help_ssh; return 0; }
+  local name="" user="$SSH_USER" identity="$SSH_IDENTITY"
+  local -a passthru=()
+  while [ $# -gt 0 ]; do case "$1" in
+    --)          shift; passthru+=("$@"); break;;
+    -u|--user)   shift; user="${1:-}";;
+    -i|--identity) shift; identity="${1:-}";;
+    -*)          warn "ignoring unknown option: $1";;
+    *)           [ -z "$name" ] && name="$1" || passthru+=("$1");;
+  esac; shift || true; done
+
+  [ -n "$name" ] || { printf "  ${R}usage:${X} $PROG ssh <droplet-name> [-u user] [-- <ssh args>]\n" >&2; return 1; }
+  [ -n "$user" ] || { printf "  ${R}--user needs a value${X}\n" >&2; return 1; }
+  have ssh || die "ssh not found — install an OpenSSH client first."
+  require_doctl || return 1
+
+  local ip; ip="$(droplet_ip "$name")" || return 1
+
+  local -a ssh_args=()
+  if [ -n "$identity" ]; then
+    [ -r "$identity" ] || { printf "  ${R}identity file not readable:${X} %s\n" "$identity" >&2; return 1; }
+    ssh_args+=(-i "$identity")
+  fi
+  # Pass-through args go AFTER the host, deliberately. OpenSSH re-enters its
+  # option loop once it has consumed the hostname, so post-host flags are still
+  # parsed as flags (`ssh host -L 8080:localhost:80` really does forward) — while
+  # a remote command only works in this position. One slot handles both; moving
+  # these before the host would break `sleipnir ssh web -- systemctl status x`.
+  ssh_args+=("$user@$ip")
+  [ "${#passthru[@]}" -gt 0 ] && ssh_args+=("${passthru[@]}")
+
+  # Announce the target on stderr — it names the account you are about to touch,
+  # and stays out of the way of any command output ssh brings back.
+  printf "  ${DIM}→ %s@%s${X} ${DIM}(%s · %s)${X}\n" "$user" "$ip" "$name" "$(context_line)" >&2
+  exec ssh "${ssh_args[@]}"
+}
+
+# ── install ───────────────────────────────────────────────────────────────────
+# Write a starter config. Refuses to clobber an existing one without --force,
+# because that file is hand-tuned and losing it is a real (if small) loss.
+cmd_install(){
+  is_help "${1:-}" && { help_install; return 0; }
+  local force=0
+  while [ $# -gt 0 ]; do case "$1" in
+    -f|--force) force=1;;
+    -*) warn "ignoring unknown option: $1";;
+    *)  warn "ignoring unexpected argument: $1";;
+  esac; shift || true; done
+
+  if [ -f "$CONFIG" ] && [ "$force" = 0 ]; then
+    printf "\n  config already exists → ${C}%s${X}\n" "$CONFIG"
+    printf "  ${DIM}edit it directly, or '%s install --force' to overwrite.${X}\n\n" "$PROG"
+    return 0
+  fi
+
+  # Prefill the SSH-key fingerprints from the account when doctl can tell us —
+  # they are public identifiers, not secrets, and they live only in this local
+  # file. Silently left blank when doctl is absent or unauthenticated.
+  local keys=""
+  if have doctl && have jq && account_json >/dev/null 2>&1; then
+    keys="$(doctl compute ssh-key list --output json 2>/dev/null \
+      | jq -r 'if type == "array" then [.[].fingerprint] | join(",") else "" end' 2>/dev/null)"
+  fi
+
+  mkdir -p "$(dirname "$CONFIG")" || { printf "  ${R}could not create %s${X}\n" "$(dirname "$CONFIG")" >&2; return 1; }
+  cat > "$CONFIG" <<CFG || { printf "  ${R}could not write %s${X}\n" "$CONFIG" >&2; return 1; }
+# sleipnir configuration — https://github.com/brett-buskirk/sleipnir
+#
+# Plain shell assignments, sourced at startup. Keep it SECRET-FREE: doctl owns
+# your DO API token, sleipnir never touches it. SLEIPNIR_* environment variables
+# override anything set here.
+
+# Defaults for new resources and connections
+SLEIPNIR_REGION="$REGION"
+SLEIPNIR_SSH_USER="$SSH_USER"
+
+# Local private key for 'sleipnir ssh' (passed to ssh -i). Blank = let ssh decide.
+SLEIPNIR_SSH_IDENTITY="$SSH_IDENTITY"
+
+# Public-key FINGERPRINTS for doctl to attach when creating droplets (v2+).
+# Not secrets, and not the same thing as SLEIPNIR_SSH_IDENTITY above.
+# List them any time with:  doctl compute ssh-key list
+SLEIPNIR_SSH_KEYS="$keys"
+
+# Default tag(s) sleipnir stamps on resources it creates (v2+)
+SLEIPNIR_TAGS="sleipnir"
+CFG
+
+  chmod 600 "$CONFIG" 2>/dev/null
+  printf "\n  ${G}✓${X} wrote ${C}%s${X}%s\n\n" "$CONFIG" \
+    "$([ -n "$keys" ] && printf " ${DIM}(ssh-key fingerprints prefilled from the account)${X}")"
+  sed 's/^/    /' "$CONFIG"
+  printf "\n  ${DIM}Edit as needed, then check it with '%s config'.${X}\n\n" "$PROG"
+}
+
 # ── not yet built ─────────────────────────────────────────────────────────────
 todo(){ printf "  ${Y}'%s' is not implemented yet${X} ${DIM}· see ROADMAP.md${X}\n" "$1" >&2; return 1; }
-cmd_ssh(){     todo ssh; }
 cmd_survey(){  todo survey; }
 cmd_apps(){    todo apps; }
 cmd_deploys(){ todo deploys; }
 cmd_logs(){    todo logs; }
-cmd_install(){ todo install; }
 
 # ── help ──────────────────────────────────────────────────────────────────────
 help_ls(){
@@ -302,6 +406,32 @@ help_ip(){
   printf "  ${DIM}Matching is exact, then case-insensitive. A name that matches more than one\n"
   printf "  droplet is an error, not a guess.${X}\n\n"
 }
+help_ssh(){
+  printf "\n  ${BD}$PROG ssh${X} <droplet-name> [-u <user>] [-i <identity>] [-- <ssh args>]\n\n"
+  printf "  Resolve a droplet name to its public IPv4 and connect. The target line goes to\n"
+  printf "  stderr before handover, so you always see which host and account you landed on.\n\n"
+  printf "  ${BD}Options${X}\n"
+  printf "    -u, --user <user>       connect as this user ${DIM}(default: %s)${X}\n" "$SSH_USER"
+  printf "    -i, --identity <path>   private key to use ${DIM}(ssh -i)${X}\n"
+  printf "    -- <ssh args>           everything after -- is passed to ssh untouched\n\n"
+  printf "  ${BD}Examples${X}\n"
+  printf "    $PROG ssh vor-analytics\n"
+  printf "    $PROG ssh vor-analytics -u deploy\n"
+  printf "    $PROG ssh vor-analytics -- -L 8080:localhost:80    ${DIM}# port-forward${X}\n"
+  printf "    $PROG ssh vor-analytics -- systemctl status caddy  ${DIM}# run and return${X}\n\n"
+  printf "  ${DIM}Name resolution is the same as '$PROG ip' — exact, then case-insensitive,\n"
+  printf "  and an ambiguous name is an error rather than a guess.${X}\n\n"
+}
+help_install(){
+  printf "\n  ${BD}$PROG install${X} [--force]\n\n"
+  printf "  Write a starter config to the resolved config path, with your current defaults\n"
+  printf "  filled in. Refuses to overwrite an existing config unless you pass --force.\n\n"
+  printf "  ${BD}Options${X}\n"
+  printf "    -f, --force   overwrite an existing config file\n\n"
+  printf "  ${DIM}If doctl is authenticated, your SSH-key fingerprints are prefilled (they are\n"
+  printf "  public identifiers, not secrets, and never leave this machine). The file is\n"
+  printf "  written 0600 and holds no credentials — doctl owns your DO token.${X}\n\n"
+}
 help_config(){
   printf "\n  ${BD}$PROG config${X}\n\n"
   printf "  Show the resolved configuration: which file was loaded, the defaults in force,\n"
@@ -315,12 +445,12 @@ usage(){
   printf "  ${BD}read + navigate${X}\n"
   printf "    ${BD}ls${X} [--tag X] [--region Y]   droplets — name · IP · region · size · \$/mo · tags\n"
   printf "    ${BD}ip${X} <name>                   print a droplet's public IPv4\n"
-  printf "    ${DIM}ssh <name>                  ssh into a droplet by name      (not built yet)${X}\n"
+  printf "    ${BD}ssh${X} <name> [-- <args>]      ssh into a droplet by name\n"
   printf "    ${DIM}survey                      whole-estate view + cost tally  (not built yet)${X}\n"
   printf "    ${DIM}apps · deploys · logs       App Platform                    (not built yet)${X}\n\n"
   printf "  ${BD}meta${X}\n"
   printf "    ${BD}config${X}                      resolved config + active doctl context\n"
-  printf "    ${DIM}install                     write a starter config          (not built yet)${X}\n"
+  printf "    ${BD}install${X}                     write a starter config\n"
   printf "    ${BD}help${X} [command]              this menu, or detail for one command\n"
   printf "    ${BD}version${X}                     print the version\n\n"
   printf "  ${DIM}doctl owns authentication; $PROG never handles your DO token.${X}\n\n"
@@ -328,9 +458,11 @@ usage(){
 
 cmd_help(){
   case "${1:-}" in
-    ls)     help_ls;;
-    ip)     help_ip;;
-    config) help_config;;
+    ls)      help_ls;;
+    ip)      help_ip;;
+    ssh)     help_ssh;;
+    config)  help_config;;
+    install) help_install;;
     "")     usage;;
     *)      printf "  ${Y}no help for '%s'${X} ${DIM}— run '$PROG help' for the menu.${X}\n" "$1" >&2; return 1;;
   esac

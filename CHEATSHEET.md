@@ -15,11 +15,13 @@ For the narrative version see the [README](README.md); for per-command detail in
 |---------|--------------|---------|
 | [`ls`](#ls) | Droplet table — name · IP · region · size · $/mo · status · tags | `--tag`, `--region`, `--json` |
 | [`ip`](#ip-name) | Print just a droplet's public IPv4 | |
+| [`ssh`](#ssh-name) | SSH into a droplet by name | `-u`, `-i`, `-- <ssh args>` |
 | [`config`](#config) | Resolved config + the active doctl context | |
+| [`install`](#install) | Write a starter config | `--force` |
 | [`help`](#help--version) | The menu, or detail for one command | |
 | `version` | Print the version | |
 
-Not built yet — see the [ROADMAP](ROADMAP.md): `ssh` · `survey` · `apps` · `deploys` · `logs` · `install`.
+Not built yet — see the [ROADMAP](ROADMAP.md): `survey` · `apps` · `deploys` · `logs`.
 
 ---
 
@@ -50,9 +52,17 @@ Precedence is **`SLEIPNIR_*` environment variables > the config file > built-in 
 | Key | Default | Used by |
 |-----|---------|---------|
 | `SLEIPNIR_REGION` | `nyc3` | default region for creates (v2) |
-| `SLEIPNIR_SSH_USER` | `root` | `ssh` (not built yet) |
+| `SLEIPNIR_SSH_USER` | `root` | `ssh` |
+| `SLEIPNIR_SSH_IDENTITY` | *(unset)* | `ssh` — local private key, passed to `ssh -i` |
+| `SLEIPNIR_SSH_KEYS` | *(unset)* | public-key **fingerprints** for doctl to attach on create (v2) |
+| `SLEIPNIR_TAGS` | `sleipnir` | default tags on created resources (v2) |
+
+> `SLEIPNIR_SSH_IDENTITY` and `SLEIPNIR_SSH_KEYS` are **different things**: the first is a private key
+> file on this machine that `ssh` uses to log in; the second is a list of public-key fingerprints
+> identifying keys stored at DigitalOcean, for attaching to droplets at create time.
 
 **Keep it secret-free.** doctl holds the API token; this file holds only defaults and profiles.
+`sleipnir install` writes it `0600`.
 
 ---
 
@@ -118,6 +128,55 @@ Errors go to stderr and diagnostics never touch stdout, so `IP=$(sleipnir ip web
 
 ---
 
+## `ssh <name>`
+
+Resolve a droplet name to its public IPv4 and connect. Sleipnir prints the target on **stderr** before
+handing the terminal to `ssh`, so you always see which host — and which account — you landed on.
+
+```sh
+sleipnir ssh vor-analytics
+sleipnir ssh vor-analytics -u deploy                    # different user
+sleipnir ssh vor-analytics -i ~/.ssh/do_ed25519         # explicit key
+sleipnir ssh vor-analytics -- -L 8080:localhost:80      # port-forward
+sleipnir ssh vor-analytics -- systemctl status caddy    # run and return
+```
+
+| Option | Effect |
+|--------|--------|
+| `-u`, `--user <user>` | Connect as this user (default: `SLEIPNIR_SSH_USER`, i.e. `root`) |
+| `-i`, `--identity <path>` | Private key to use, passed to `ssh -i` (default: `SLEIPNIR_SSH_IDENTITY`) |
+| `-- <ssh args>` | Everything after `--` is handed to `ssh` untouched |
+
+Name resolution is identical to [`ip`](#ip-name) — exact, then case-insensitive, and an ambiguous name
+is an error rather than a guess.
+
+> **Why pass-through args land after the host:** OpenSSH re-enters its option loop once it has consumed
+> the hostname, so `ssh host -L 8080:localhost:80` really does set up the forward — while a *remote
+> command* only works in that position. Putting everything after the host is what lets one `--` slot
+> serve both.
+
+---
+
+## `install`
+
+Write a starter config to the resolved config path, with your current defaults filled in. **Refuses to
+overwrite an existing config** unless you pass `--force` — that file is hand-tuned.
+
+```sh
+sleipnir install
+sleipnir install --force    # overwrite an existing config
+```
+
+| Option | Effect |
+|--------|--------|
+| `-f`, `--force` | Overwrite an existing config file |
+
+If doctl is authenticated, your SSH-key **fingerprints** are prefilled from the account — public
+identifiers, not secrets, and they never leave the machine. The file is written `0600` and contains no
+credentials: doctl owns your DO token.
+
+---
+
 ## `config`
 
 Show the resolved configuration: which file was loaded (if any), the defaults in force, and the doctl
@@ -135,6 +194,7 @@ $ sleipnir config
     file        /home/you/.config/sleipnir/config (loaded)
     region      nyc3
     ssh user    root
+    ssh key     (ssh decides)
     doctl       brett
     account     Brett Buskirk LLC
 ```
