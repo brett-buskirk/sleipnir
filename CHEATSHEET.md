@@ -16,12 +16,15 @@ For the narrative version see the [README](README.md); for per-command detail in
 | [`ls`](#ls) | Droplet table — name · IP · region · size · $/mo · status · tags | `--tag`, `--region`, `--json` |
 | [`ip`](#ip-name) | Print just a droplet's public IPv4 | |
 | [`ssh`](#ssh-name) | SSH into a droplet by name | `-u`, `-i`, `-- <ssh args>` |
+| [`apps`](#apps) | App Platform apps — phase, age, components, live URL | `--json` |
+| [`deploys`](#deploys-app) | Recent deployments for an app | `-n`, `--json` |
+| [`logs`](#logs-app-component) | Read an app's logs | `-f`, `-n`, `--type` |
 | [`config`](#config) | Resolved config + the active doctl context | |
 | [`install`](#install) | Write a starter config | `--force` |
 | [`help`](#help--version) | The menu, or detail for one command | |
 | `version` | Print the version | |
 
-Not built yet — see the [ROADMAP](ROADMAP.md): `survey` · `apps` · `deploys` · `logs`.
+Not built yet — see the [ROADMAP](ROADMAP.md): `survey`.
 
 ---
 
@@ -154,6 +157,99 @@ is an error rather than a guess.
 > the hostname, so `ssh host -L 8080:localhost:80` really does set up the forward — while a *remote
 > command* only works in that position. Putting everything after the host is what lets one `--` slot
 > serve both.
+
+---
+
+## `apps`
+
+Every App Platform app on the active account: name · deployment phase · time since the last deploy ·
+components · region · tier · live URL. *(network — one API call)*
+
+```sh
+sleipnir apps
+sleipnir apps --json
+```
+
+```console
+$ sleipnir apps
+
+  App Platform  · Brett Buskirk LLC · context brett
+
+  brett-buskirk-dev  ACTIVE    14m  static:1  nyc  starter  https://brett-buskirk.dev
+  day-one            ACTIVE     1d  static:1  nyc  starter  https://dayone-sim.app
+  rc-journey         ACTIVE     1d  static:1  nyc  starter  https://rcjourney.cloud
+
+  3 apps  · age is time since the last deployment · sleipnir deploys <app> for history
+```
+
+**`--json` fields:** `name, id, region, tier, url, phase, deployed` (epoch), `runtime` (count of
+executing components), `components` (compact summary)
+
+Components are counted by kind — `svc` · `static` · `worker` · `job` · `fn`. An app with no `svc`,
+`worker`, or `job` has **no runtime**, which is what [`logs`](#logs-app-component) keys off.
+
+---
+
+## `deploys <app>`
+
+Recent deployments, newest first — short id · phase · age · cause (usually the triggering commit).
+
+```sh
+sleipnir deploys day-one
+sleipnir deploys day-one -n 25
+sleipnir deploys day-one --json
+```
+
+| Option | Effect |
+|--------|--------|
+| `-n`, `--limit <count>` | How many to show (default: `10`) |
+| `--json` | Machine-readable rows |
+
+```console
+$ sleipnir deploys day-one -n 3
+
+  deployments · day-one · Brett Buskirk LLC · context brett
+
+  d86e5c57  ACTIVE         1d  commit 70595d7 pushed to github.com/brett-buskirk/day-one/tree/main
+  6e30b8ce  SUPERSEDED     1w  commit 06e9b75 pushed to github.com/brett-buskirk/day-one/tree/main
+  58f148ee  SUPERSEDED     1w  commit ccfa00b pushed to github.com/brett-buskirk/day-one/tree/main
+```
+
+> Takes an app **name**. `doctl apps list-deployments` demands a UUID and rejects a name outright
+> (`invalid uuid`) — sleipnir resolves it for you, using the same matching rules as `ip`.
+
+---
+
+## `logs <app> [component]`
+
+Read an app's logs. Hands off to doctl, so `-f` streams until you interrupt it.
+
+```sh
+sleipnir logs day-one
+sleipnir logs day-one -f                  # follow
+sleipnir logs day-one -n 100              # last 100 lines
+sleipnir logs day-one web --type build    # one component, explicit type
+```
+
+| Option | Effect |
+|--------|--------|
+| `-f`, `--follow` | Stream new lines as they arrive |
+| `-n`, `--tail <lines>` | Show only the last N lines |
+| `--type <type>` | `build` · `deploy` · `run` (default: chosen for you — see below) |
+
+### The log-type default
+
+doctl asks for **run** logs unless told otherwise. But an app with no service, worker, or job has no
+runtime, and that request **hangs on a websocket that never delivers** — no error, no output, just a
+stall until you kill it. For those apps sleipnir asks for **build** logs instead, and says so:
+
+```console
+$ sleipnir logs day-one
+  → day-one build logs · Brett Buskirk LLC · context brett (no runtime component — showing build logs)
+```
+
+Pass `--type` to override. Note that **starter-tier apps have no deploy logs at all** — DigitalOcean
+returns a clear `400` saying so, which sleipnir passes straight through.
 
 ---
 

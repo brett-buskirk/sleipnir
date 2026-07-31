@@ -48,6 +48,25 @@ is_help(){ case "${1:-}" in help|-h|--help) return 0;; *) return 1;; esac; }
 die(){ printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
 warn(){ printf '%s: %s\n' "$PROG" "$*" >&2; }
 
+# Compact age of a unix timestamp ("3d", "2w"). Same shape the pack uses. An
+# empty or unparseable stamp renders as an em dash rather than "55y ago".
+age_short(){
+  local ts="${1:-}" now diff
+  [[ "$ts" =~ ^[0-9]+$ ]] || { printf '—'; return 0; }
+  now="$(date +%s)"; diff=$(( now - ts )); [ "$diff" -lt 0 ] && diff=0
+  if   [ "$diff" -lt 3600 ];    then printf '%dm'  $(( diff/60 ))
+  elif [ "$diff" -lt 86400 ];   then printf '%dh'  $(( diff/3600 ))
+  elif [ "$diff" -lt 604800 ];  then printf '%dd'  $(( diff/86400 ))
+  elif [ "$diff" -lt 2592000 ]; then printf '%dw'  $(( diff/604800 ))
+  else                               printf '%dmo' $(( diff/2592000 )); fi
+}
+
+# DigitalOcean stamps are RFC3339, sometimes with fractional seconds that
+# fromdateiso8601 refuses. Strip the fraction, and yield null rather than
+# erroring out on anything unexpected.
+JQ_EPOCH='def epoch: if type != "string" or . == "" then null
+                     else (try (sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) catch null) end;'
+
 # ── the active context — "which account am I about to hit?" ───────────────────
 # doctl has named contexts the way gh has accounts, and hitting the wrong one is
 # the DO analog of pushing as the wrong GitHub user. Both lookups are memoized so
@@ -376,12 +395,232 @@ CFG
   printf "\n  ${DIM}Edit as needed, then check it with '%s config'.${X}\n\n" "$PROG"
 }
 
+# ── App Platform ──────────────────────────────────────────────────────────────
+# Memoized, same contract as droplets_json: non-zero means doctl failed, which is
+# not the same as an account with no apps.
+APPS_JSON=""; APPS_RC=-1
+apps_json(){
+  if [ "$APPS_RC" -lt 0 ]; then
+    local raw
+    raw="$(doctl apps list --output json 2>&1)"; APPS_RC=$?
+    if [ "$APPS_RC" -ne 0 ]; then
+      warn "doctl could not list apps — $(head -1 <<<"$raw")"
+      APPS_JSON='[]'
+    elif jq -e 'type == "array"' >/dev/null 2>&1 <<<"$raw"; then
+      APPS_JSON="$raw"
+    else
+      APPS_JSON='[]'
+    fi
+  fi
+  printf '%s' "$APPS_JSON"
+  return "$APPS_RC"
+}
+
+# Flatten an app to the fields sleipnir shows. `runtime` counts the components
+# that actually execute — services, workers, jobs. It drives the log-type default
+# below, because a site with none of them has no run logs to tail.
+APP_SELECT='
+  [ .[] | {
+      name:    (.spec.name // ""),
+      id:      (.id // ""),
+      region:  (.region.slug // ""),
+      tier:    (.tier_slug // ""),
+      url:     (.live_url // .default_ingress // ""),
+      phase:   (.active_deployment.phase // ""),
+      deployed: ((.active_deployment.updated_at // .last_deployment_active_at // null) | epoch),
+      runtime: (((.spec.services // []) | length)
+                + ((.spec.workers // []) | length)
+                + ((.spec.jobs // []) | length)),
+      components: ([ (if ((.spec.services // []) | length) > 0 then "svc:\((.spec.services | length))" else empty end),
+                     (if ((.spec.static_sites // []) | length) > 0 then "static:\((.spec.static_sites | length))" else empty end),
+                     (if ((.spec.workers // []) | length) > 0 then "worker:\((.spec.workers | length))" else empty end),
+                     (if ((.spec.jobs // []) | length) > 0 then "job:\((.spec.jobs | length))" else empty end),
+                     (if ((.spec.functions // []) | length) > 0 then "fn:\((.spec.functions | length))" else empty end)
+                   ] | join(" "))
+  } ] | sort_by(.name)'
+
+# Resolve an app name to one flattened record on stdout. Same matching discipline
+# as droplet_ip: exact, then case-insensitive, and ambiguity is an error. This
+# exists because `doctl apps list-deployments` demands a UUID and refuses a name.
+app_record(){
+  local name="$1" json n
+  json="$(apps_json)" || return 1
+  n="$(jq -r --arg n "$name" "$JQ_EPOCH $APP_SELECT | [ .[] | select(.name == \$n) ] | length" <<<"$json")"
+  [ "$n" = 0 ] && n="$(jq -r --arg n "$name" \
+    "$JQ_EPOCH $APP_SELECT | [ .[] | select((.name | ascii_downcase) == (\$n | ascii_downcase)) ] | length" <<<"$json")"
+
+  if [ "$n" = 0 ]; then
+    printf "  ${R}no app named '%s'${X} ${DIM}· %s${X}\n" "$name" "$(context_line)" >&2
+    local near
+    near="$(jq -r --arg n "$name" \
+      '[ .[] | select((.spec.name // "") | ascii_downcase | contains($n | ascii_downcase)) | .spec.name ] | join(", ")' <<<"$json")"
+    [ -n "$near" ] && printf "  ${DIM}did you mean: %s${X}\n" "$near" >&2
+    printf "  ${DIM}list them all:  %s apps${X}\n" "$PROG" >&2
+    return 1
+  fi
+  if [ "$n" -gt 1 ]; then
+    printf "  ${R}'%s' matches %s apps${X} ${DIM}· %s${X}\n" "$name" "$n" "$(context_line)" >&2
+    return 1
+  fi
+  jq -r --arg n "$name" \
+    "$JQ_EPOCH $APP_SELECT | .[] | select((.name | ascii_downcase) == (\$n | ascii_downcase))" <<<"$json"
+}
+
+# Colour a deployment/app phase by what it means for you.
+phase_color(){
+  case "$1" in
+    ACTIVE|SUPERSEDED) printf '%s' "$G";;
+    ERROR|CANCELED)    printf '%s' "$R";;
+    "")                printf '%s' "$DIM";;
+    *)                 printf '%s' "$Y";;   # BUILDING, DEPLOYING, PENDING…
+  esac
+}
+
+cmd_apps(){
+  is_help "${1:-}" && { help_apps; return 0; }
+  local as_json=0
+  while [ $# -gt 0 ]; do case "$1" in
+    --json) as_json=1;;
+    -*) warn "ignoring unknown option: $1";;
+    *)  warn "ignoring unexpected argument: $1";;
+  esac; shift || true; done
+
+  require_doctl || return 1
+  local json; json="$(apps_json)"; local rc=$?
+
+  if [ "$as_json" = 1 ]; then
+    jq "$JQ_EPOCH $APP_SELECT" <<<"$json"
+    return "$rc"
+  fi
+  [ "$rc" -ne 0 ] && return "$rc"
+
+  local rows
+  rows="$(jq -r "$JQ_EPOCH $APP_SELECT | .[] | [.name, .phase, (.deployed // \"\"), .components, .region, .tier, .url] | @tsv" <<<"$json")"
+
+  printf "\n  ${BD}App Platform${X}  ${DIM}· %s${X}\n\n" "$(context_line)"
+  if [ -z "$rows" ]; then
+    printf "  ${DIM}no apps.${X}\n\n"; return 0
+  fi
+
+  local name phase deployed comps region tier url
+  local w_name=4 w_phase=5 w_comps=10
+  while IFS=$'\t' read -r name phase deployed comps region tier url; do
+    [ "${#name}" -gt "$w_name" ]   && w_name="${#name}"
+    [ "${#phase}" -gt "$w_phase" ] && w_phase="${#phase}"
+    [ "${#comps}" -gt "$w_comps" ] && w_comps="${#comps}"
+  done <<<"$rows"
+
+  local n=0
+  while IFS=$'\t' read -r name phase deployed comps region tier url; do
+    [ -z "$name" ] && continue
+    printf "  ${C}%-*s${X}  $(phase_color "$phase")%-*s${X}  %5s  ${DIM}%-*s${X}  ${DIM}%-5s %-8s${X}  %s\n" \
+      "$w_name" "$name" "$w_phase" "$phase" "$(age_short "$deployed")" \
+      "$w_comps" "$comps" "$region" "$tier" "$url"
+    n=$((n + 1))
+  done <<<"$rows"
+
+  printf "\n  ${BD}%d app%s${X}  ${DIM}· age is time since the last deployment · %s deploys <app> for history${X}\n\n" \
+    "$n" "$([ "$n" = 1 ] || printf 's')" "$PROG"
+}
+
+cmd_deploys(){
+  is_help "${1:-}" && { help_deploys; return 0; }
+  local app="" limit=10 as_json=0
+  while [ $# -gt 0 ]; do case "$1" in
+    -n|--limit) shift; limit="${1:-10}";;
+    --json)     as_json=1;;
+    -*) warn "ignoring unknown option: $1";;
+    *)  if [ -z "$app" ]; then app="$1"; else warn "ignoring unexpected argument: $1"; fi;;
+  esac; shift || true; done
+
+  [ -n "$app" ] || { printf "  ${R}usage:${X} $PROG deploys <app> [-n <count>] [--json]\n" >&2; return 1; }
+  if ! [[ "$limit" =~ ^[1-9][0-9]*$ ]]; then
+    printf "  ${R}-n needs a positive number${X}\n" >&2; return 1
+  fi
+  require_doctl || return 1
+
+  local rec id name; rec="$(app_record "$app")" || return 1
+  id="$(jq -r '.id' <<<"$rec")"; name="$(jq -r '.name' <<<"$rec")"
+
+  local raw rc
+  raw="$(doctl apps list-deployments "$id" --output json 2>&1)"; rc=$?
+  if [ "$rc" -ne 0 ] || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$raw"; then
+    printf "  ${R}could not list deployments for '%s'${X}\n  ${DIM}%s${X}\n" "$name" "$(head -1 <<<"$raw")" >&2
+    return 1
+  fi
+
+  local sel="$JQ_EPOCH
+    [ .[] | { id: (.id // \"\"), phase: (.phase // \"\"),
+              created: ((.created_at // null) | epoch),
+              cause: (.cause // \"\") } ]
+    | sort_by(.created) | reverse | .[0:$limit]"
+
+  if [ "$as_json" = 1 ]; then jq "$sel" <<<"$raw"; return 0; fi
+
+  printf "\n  ${BD}deployments${X} ${DIM}· %s · %s${X}\n\n" "$name" "$(context_line)"
+  local rows; rows="$(jq -r "$sel | .[] | [.id, .phase, (.created // \"\"), .cause] | @tsv" <<<"$raw")"
+  if [ -z "$rows" ]; then printf "  ${DIM}no deployments.${X}\n\n"; return 0; fi
+
+  local did phase created cause n=0 w_phase=5
+  while IFS=$'\t' read -r did phase created cause; do
+    [ "${#phase}" -gt "$w_phase" ] && w_phase="${#phase}"
+  done <<<"$rows"
+  while IFS=$'\t' read -r did phase created cause; do
+    [ -z "$did" ] && continue
+    printf "  ${DIM}%s${X}  $(phase_color "$phase")%-*s${X}  %5s  %s\n" \
+      "${did:0:8}" "$w_phase" "$phase" "$(age_short "$created")" "$cause"
+    n=$((n + 1))
+  done <<<"$rows"
+  printf "\n  ${BD}%d shown${X}  ${DIM}· newest first · %s logs %s  to read them${X}\n\n" "$n" "$PROG" "$name"
+}
+
+cmd_logs(){
+  is_help "${1:-}" && { help_logs; return 0; }
+  local app="" component="" type="" follow=0 tail_n=""
+  while [ $# -gt 0 ]; do case "$1" in
+    -f|--follow) follow=1;;
+    -n|--tail)   shift; tail_n="${1:-}";;
+    --type)      shift; type="${1:-}";;
+    -*) warn "ignoring unknown option: $1";;
+    *)  if   [ -z "$app" ];       then app="$1"
+        elif [ -z "$component" ]; then component="$1"
+        else warn "ignoring unexpected argument: $1"; fi;;
+  esac; shift || true; done
+
+  [ -n "$app" ] || { printf "  ${R}usage:${X} $PROG logs <app> [component] [-f] [-n <lines>] [--type build|deploy|run]\n" >&2; return 1; }
+  case "$type" in
+    ""|build|deploy|run) ;;
+    *) printf "  ${R}--type must be one of: build, deploy, run${X}\n" >&2; return 1;;
+  esac
+  [ -n "$tail_n" ] && { [[ "$tail_n" =~ ^[0-9]+$ ]] || { printf "  ${R}-n needs a number${X}\n" >&2; return 1; }; }
+  require_doctl || return 1
+
+  local rec name runtime; rec="$(app_record "$app")" || return 1
+  name="$(jq -r '.name' <<<"$rec")"; runtime="$(jq -r '.runtime' <<<"$rec")"
+
+  # doctl defaults to run logs, which is the wrong default for an app with no
+  # running component: a static site has no runtime, so the request hangs on a
+  # websocket that never delivers. Pick build logs in that case and say so —
+  # this is the "sane defaults" the wrapper exists to provide.
+  local chose=""
+  if [ -z "$type" ]; then
+    if [ "$runtime" = 0 ]; then type="build"; chose=" ${DIM}(no runtime component — showing build logs)${X}"
+    else type="run"; fi
+  fi
+
+  local -a args=(apps logs "$name")
+  [ -n "$component" ] && args+=("$component")
+  args+=(--type "$type")
+  [ -n "$tail_n" ] && args+=(--tail "$tail_n")
+  [ "$follow" = 1 ] && args+=(--follow)
+
+  printf "  ${DIM}→ %s %s logs · %s${X}%s\n" "$name" "$type" "$(context_line)" "$chose" >&2
+  exec doctl "${args[@]}"
+}
+
 # ── not yet built ─────────────────────────────────────────────────────────────
 todo(){ printf "  ${Y}'%s' is not implemented yet${X} ${DIM}· see ROADMAP.md${X}\n" "$1" >&2; return 1; }
 cmd_survey(){  todo survey; }
-cmd_apps(){    todo apps; }
-cmd_deploys(){ todo deploys; }
-cmd_logs(){    todo logs; }
 
 # ── help ──────────────────────────────────────────────────────────────────────
 help_ls(){
@@ -432,6 +671,44 @@ help_install(){
   printf "  public identifiers, not secrets, and never leave this machine). The file is\n"
   printf "  written 0600 and holds no credentials — doctl owns your DO token.${X}\n\n"
 }
+help_apps(){
+  printf "\n  ${BD}$PROG apps${X} [--json]\n\n"
+  printf "  Every App Platform app on the active account — name · deployment phase · time\n"
+  printf "  since the last deploy · components · region · tier · live URL.\n"
+  printf "  ${DIM}(network — one API call)${X}\n\n"
+  printf "  ${BD}Options${X}\n"
+  printf "    --json   machine-readable rows instead of the table\n\n"
+  printf "  ${DIM}Components are counted by kind (svc / static / worker / job / fn). Apps with\n"
+  printf "  no svc, worker, or job have no runtime — which is why '$PROG logs' picks\n"
+  printf "  build logs for them.${X}\n\n"
+}
+help_deploys(){
+  printf "\n  ${BD}$PROG deploys${X} <app> [-n <count>] [--json]\n\n"
+  printf "  Recent deployments for an app, newest first — short id · phase · age · cause\n"
+  printf "  (usually the commit that triggered it).\n\n"
+  printf "  ${BD}Options${X}\n"
+  printf "    -n, --limit <count>   how many to show ${DIM}(default: 10)${X}\n"
+  printf "    --json                machine-readable rows\n\n"
+  printf "  ${DIM}Takes an app NAME. doctl's own list-deployments demands a UUID and rejects a\n"
+  printf "  name outright — sleipnir resolves it for you.${X}\n\n"
+}
+help_logs(){
+  printf "\n  ${BD}$PROG logs${X} <app> [component] [-f] [-n <lines>] [--type build|deploy|run]\n\n"
+  printf "  Read an app's logs. Hands off to doctl, so -f streams until you interrupt it.\n\n"
+  printf "  ${BD}Options${X}\n"
+  printf "    -f, --follow          stream new lines as they arrive\n"
+  printf "    -n, --tail <lines>    show only the last N lines\n"
+  printf "    --type <type>         build · deploy · run ${DIM}(default: chosen for you, below)${X}\n\n"
+  printf "  ${BD}Examples${X}\n"
+  printf "    $PROG logs day-one\n"
+  printf "    $PROG logs day-one -f              ${DIM}# follow${X}\n"
+  printf "    $PROG logs day-one web --type build\n\n"
+  printf "  ${DIM}On the default: doctl asks for RUN logs unless told otherwise, but an app with\n"
+  printf "  no service, worker, or job has no runtime — that request hangs on a websocket\n"
+  printf "  that never delivers. For those apps sleipnir asks for build logs instead, and\n"
+  printf "  tells you it did. Pass --type to override. Starter-tier apps have no deploy\n"
+  printf "  logs at all; DigitalOcean will say so.${X}\n\n"
+}
 help_config(){
   printf "\n  ${BD}$PROG config${X}\n\n"
   printf "  Show the resolved configuration: which file was loaded, the defaults in force,\n"
@@ -447,7 +724,9 @@ usage(){
   printf "    ${BD}ip${X} <name>                   print a droplet's public IPv4\n"
   printf "    ${BD}ssh${X} <name> [-- <args>]      ssh into a droplet by name\n"
   printf "    ${DIM}survey                      whole-estate view + cost tally  (not built yet)${X}\n"
-  printf "    ${DIM}apps · deploys · logs       App Platform                    (not built yet)${X}\n\n"
+  printf "    ${BD}apps${X}                        App Platform apps — phase, age, live URL\n"
+  printf "    ${BD}deploys${X} <app>               recent deployments for an app\n"
+  printf "    ${BD}logs${X} <app> [component]      read an app's logs ${DIM}(-f to follow)${X}\n\n"
   printf "  ${BD}meta${X}\n"
   printf "    ${BD}config${X}                      resolved config + active doctl context\n"
   printf "    ${BD}install${X}                     write a starter config\n"
@@ -461,6 +740,9 @@ cmd_help(){
     ls)      help_ls;;
     ip)      help_ip;;
     ssh)     help_ssh;;
+    apps)    help_apps;;
+    deploys) help_deploys;;
+    logs)    help_logs;;
     config)  help_config;;
     install) help_install;;
     "")     usage;;

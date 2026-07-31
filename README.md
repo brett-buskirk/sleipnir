@@ -17,8 +17,8 @@ doctl invocations into short verbs with sane defaults. The DigitalOcean-side com
 | `sleipnir ip <name>` | Just the public IPv4 of a droplet (for ssh / ansible) | ✅ |
 | `sleipnir ssh <name> [-- <args>]` | SSH into a droplet by name | ✅ |
 | `sleipnir config` / `install` | Show the resolved config, or write a starter one | ✅ |
+| `sleipnir apps` / `deploys <app>` / `logs <app>` | App Platform — apps, deploy history, logs | ✅ |
 | `sleipnir survey` | Whole-estate view — droplets, apps, Spaces, DBs, firewalls + a cost tally | |
-| `sleipnir apps` / `deploys <app>` / `logs <app>` | App Platform | |
 
 ```console
 $ sleipnir ls
