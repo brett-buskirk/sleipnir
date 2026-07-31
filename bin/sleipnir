@@ -28,6 +28,7 @@ CONFIG="${SLEIPNIR_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/sleipnir/config}"
 _env_REGION="${SLEIPNIR_REGION-}"
 _env_SSH_USER="${SLEIPNIR_SSH_USER-}"
 _env_SSH_IDENTITY="${SLEIPNIR_SSH_IDENTITY-}"
+_env_VOLUME_PRICE_GIB="${SLEIPNIR_VOLUME_PRICE_GIB-}"
 # shellcheck source=/dev/null
 [ -f "$CONFIG" ] && . "$CONFIG"
 REGION="${_env_REGION:-${SLEIPNIR_REGION:-nyc3}}"
@@ -36,6 +37,11 @@ SSH_USER="${_env_SSH_USER:-${SLEIPNIR_SSH_USER:-root}}"
 # SLEIPNIR_SSH_KEYS, which holds public-key *fingerprints* for doctl to attach at
 # create time (v2). One is a file on this machine, the other is an ID at DO.
 SSH_IDENTITY="${_env_SSH_IDENTITY:-${SLEIPNIR_SSH_IDENTITY:-}}"
+# Block-storage price per GiB/month, used by `survey` to cost volumes. doctl does
+# not report a volume's price the way it does a droplet's size, so this is the one
+# number sleipnir has to be told rather than read — in config, not hardcoded, so
+# it can be corrected when DigitalOcean's pricing moves.
+VOLUME_PRICE_GIB="${_env_VOLUME_PRICE_GIB:-${SLEIPNIR_VOLUME_PRICE_GIB:-0.10}}"
 
 # ── palette — color only on a TTY, and never when NO_COLOR is set ─────────────
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -466,6 +472,17 @@ app_record(){
     "$JQ_EPOCH $APP_SELECT | .[] | select((.name | ascii_downcase) == (\$n | ascii_downcase))" <<<"$json"
 }
 
+# Colour a droplet status by what it means for you. Shared by `ls` and `survey`
+# so the same word never renders two different ways.
+status_color(){
+  case "$1" in
+    active)      printf '%s' "$G";;
+    new)         printf '%s' "$Y";;
+    off|archive) printf '%s' "$DIM";;
+    *)           printf '%s' "$R";;
+  esac
+}
+
 # Colour a deployment/app phase by what it means for you.
 phase_color(){
   case "$1" in
@@ -618,9 +635,171 @@ cmd_logs(){
   exec doctl "${args[@]}"
 }
 
-# ── not yet built ─────────────────────────────────────────────────────────────
-todo(){ printf "  ${Y}'%s' is not implemented yet${X} ${DIM}· see ROADMAP.md${X}\n" "$1" >&2; return 1; }
-cmd_survey(){  todo survey; }
+# ── survey ────────────────────────────────────────────────────────────────────
+# Generic list fetch for the resources survey counts. doctl emits [] for an empty
+# account, so an empty array honestly means "none" — but a non-zero exit means we
+# could not ask, and the renderer must not show that as "none". Every section
+# distinguishes the two.
+doctl_list(){
+  local raw rc
+  raw="$(doctl "$@" --output json 2>&1)"; rc=$?
+  if [ "$rc" -eq 0 ] && jq -e 'type == "array"' >/dev/null 2>&1 <<<"$raw"; then
+    printf '%s' "$raw"; return 0
+  fi
+  printf '%s' '[]'; return 1
+}
+
+# Render one "counted, not priced" line: a count, "none", or an honest "unknown"
+# when the API call failed.
+survey_count(){
+  local label="$1" json="$2" rc="$3" n
+  if [ "$rc" -ne 0 ]; then
+    printf "  %-16s ${Y}unknown${X} ${DIM}(doctl could not list them)${X}\n" "$label"; return
+  fi
+  n="$(jq -r 'length' <<<"$json" 2>/dev/null || printf 0)"
+  if [ "$n" = 0 ]; then printf "  %-16s ${DIM}none${X}\n" "$label"
+  else printf "  %-16s ${BD}%s${X}\n" "$label" "$n"; fi
+}
+
+cmd_survey(){
+  is_help "${1:-}" && { help_survey; return 0; }
+  local as_json=0
+  while [ $# -gt 0 ]; do case "$1" in
+    --json) as_json=1;;
+    -*) warn "ignoring unknown option: $1";;
+    *)  warn "ignoring unexpected argument: $1";;
+  esac; shift || true; done
+  require_doctl || return 1
+
+  local dj aj vols fws rips dbs lbs k8s
+  local dj_rc=0 aj_rc=0 vols_rc fws_rc rips_rc dbs_rc lbs_rc k8s_rc
+  dj="$(droplets_json)" || dj_rc=1
+  aj="$(apps_json)"     || aj_rc=1
+  vols="$(doctl_list compute volume list)";        vols_rc=$?
+  fws="$(doctl_list compute firewall list)";       fws_rc=$?
+  rips="$(doctl_list compute reserved-ip list)";   rips_rc=$?
+  dbs="$(doctl_list databases list)";              dbs_rc=$?
+  lbs="$(doctl_list compute load-balancer list)";  lbs_rc=$?
+  k8s="$(doctl_list kubernetes cluster list)";     k8s_rc=$?
+
+  # What we can price honestly: droplet list price, and block storage at the
+  # configured per-GiB rate. Everything else is counted, not costed — see the
+  # note under the total and in `survey help`.
+  local d_cost v_gib v_cost total
+  d_cost="$(jq -r '[.[].size.price_monthly // 0] | add // 0' <<<"$dj")"
+  v_gib="$(jq -r '[.[].size_gigabytes // 0] | add // 0' <<<"$vols")"
+  v_cost="$(awk -v g="$v_gib" -v r="$VOLUME_PRICE_GIB" 'BEGIN{printf "%.2f", g * r}')"
+  total="$(awk -v a="$d_cost" -v b="$v_cost" 'BEGIN{printf "%.2f", a + b}')"
+
+  if [ "$as_json" = 1 ]; then
+    jq -n \
+      --arg account "$(account_label)" --arg context "$(do_context)" \
+      --argjson droplets "$dj" --argjson apps "$aj" --argjson volumes "$vols" \
+      --argjson firewalls "$fws" --argjson reservedIps "$rips" --argjson databases "$dbs" \
+      --argjson loadBalancers "$lbs" --argjson kubernetes "$k8s" \
+      --argjson dropletMonthly "$d_cost" --argjson volumeMonthly "$v_cost" \
+      --argjson estimatedMonthly "$total" --argjson volumeGib "$v_gib" \
+      '{ account: $account, context: $context,
+         droplets:      { count: ($droplets|length),      monthly: $dropletMonthly },
+         apps:          { count: ($apps|length) },
+         volumes:       { count: ($volumes|length), gib: $volumeGib, monthly: $volumeMonthly },
+         firewalls:     { count: ($firewalls|length) },
+         reservedIps:   { count: ($reservedIps|length) },
+         databases:     { count: ($databases|length) },
+         loadBalancers: { count: ($loadBalancers|length) },
+         kubernetes:    { count: ($kubernetes|length) },
+         estimatedMonthly: $estimatedMonthly,
+         priced: ["droplets", "volumes"],
+         notes: ["Spaces buckets are not listable via doctl.",
+                 "Cost covers droplet list price and block storage only."] }'
+    return 0
+  fi
+
+  printf "\n  ${BD}survey${X}  ${DIM}· %s${X}\n" "$(context_line)"
+  printf "  ${DIM}(network — several API calls)${X}\n\n"
+
+  # droplets
+  if [ "$dj_rc" -ne 0 ]; then
+    printf "  ${BD}droplets${X}         ${Y}unknown${X} ${DIM}(doctl could not list them)${X}\n\n"
+  else
+    local dn; dn="$(jq -r 'length' <<<"$dj")"
+    printf "  ${BD}droplets${X}         ${BD}%s${X}%s\n" "$dn" \
+      "$([ "$dn" != 0 ] && printf "  ${DIM}~\$%s/mo${X}" "$(awk -v t="$d_cost" 'BEGIN{printf (t==int(t))?"%d":"%.2f", t}')")"
+    jq -r '.[] | [.name,
+                  (((.networks.v4 // []) | map(select(.type == "public")) | .[0].ip_address) // "—"),
+                  .region.slug, .size_slug, (.size.price_monthly // 0 | tostring), .status] | @tsv' <<<"$dj" \
+    | while IFS=$'\t' read -r n ip rg sz pr st; do
+        printf "    ${C}%-20s${X} %-16s ${DIM}%-6s %-14s${X} %7s  $(status_color "$st")%s${X}\n" \
+          "$n" "$ip" "$rg" "$sz" "\$$pr/mo" "$st"
+
+      done
+    printf "\n"
+  fi
+
+  # App Platform
+  if [ "$aj_rc" -ne 0 ]; then
+    printf "  ${BD}apps${X}             ${Y}unknown${X} ${DIM}(doctl could not list them)${X}\n\n"
+  else
+    local an; an="$(jq -r 'length' <<<"$aj")"
+    printf "  ${BD}apps${X}             ${BD}%s${X}  ${DIM}(App Platform — not costed below)${X}\n" "$an"
+    jq -r "$JQ_EPOCH $APP_SELECT | .[] | [.name, .phase, (.deployed // \"\"), .url] | @tsv" <<<"$aj" \
+    | while IFS=$'\t' read -r n ph dep url; do
+        printf "    ${C}%-20s${X} $(phase_color "$ph")%-10s${X} %5s  ${DIM}%s${X}\n" \
+          "$n" "$ph" "$(age_short "$dep")" "$url"
+      done
+    printf "\n"
+  fi
+
+  # volumes — priced, and worth showing what they are attached to
+  if [ "$vols_rc" -ne 0 ]; then
+    printf "  ${BD}volumes${X}          ${Y}unknown${X} ${DIM}(doctl could not list them)${X}\n\n"
+  else
+    local vn; vn="$(jq -r 'length' <<<"$vols")"
+    printf "  ${BD}volumes${X}          ${BD}%s${X}%s\n" "$vn" \
+      "$([ "$vn" != 0 ] && printf "  ${DIM}%s GiB · ~\$%s/mo${X}" "$v_gib" "$(awk -v t="$v_cost" 'BEGIN{printf (t==int(t))?"%d":"%.2f", t}')")"
+    [ "$vn" != 0 ] && jq -r --argjson d "$dj" \
+      '.[] | [.name, (.size_gigabytes | tostring), (.region.slug // ""),
+              ([.droplet_ids[]? as $id | ($d[] | select(.id == $id) | .name)] | join(",") )] | @tsv' <<<"$vols" \
+    | while IFS=$'\t' read -r n gib rg att; do
+        printf "    ${C}%-20s${X} %5s GiB  ${DIM}%-6s${X}  %s\n" "$n" "$gib" "$rg" \
+          "$([ -n "$att" ] && printf "→ %s" "$att" || printf "${Y}unattached${X}")"
+      done
+    printf "\n"
+  fi
+
+  # firewalls — attached droplet count is the useful bit
+  if [ "$fws_rc" -ne 0 ]; then
+    printf "  ${BD}firewalls${X}        ${Y}unknown${X} ${DIM}(doctl could not list them)${X}\n\n"
+  else
+    local fn; fn="$(jq -r 'length' <<<"$fws")"
+    printf "  ${BD}firewalls${X}        ${BD}%s${X}\n" "$fn"
+    [ "$fn" != 0 ] && jq -r '.[] | [.name, (.status // ""), ((.droplet_ids // []) | length | tostring)] | @tsv' <<<"$fws" \
+    | while IFS=$'\t' read -r n st nd; do
+        printf "    ${C}%-28s${X} ${DIM}%-10s${X} %s droplet%s\n" "$n" "$st" "$nd" "$([ "$nd" = 1 ] || printf 's')"
+      done
+    printf "\n"
+  fi
+
+  # The rest: counted only.
+  survey_count "reserved IPs"   "$rips" "$rips_rc"
+  survey_count "databases"      "$dbs"  "$dbs_rc"
+  survey_count "load balancers" "$lbs"  "$lbs_rc"
+  survey_count "kubernetes"     "$k8s"  "$k8s_rc"
+  printf "  %-16s ${DIM}not listable via doctl${X}\n" "Spaces"
+
+  # Name exactly what the number covers. If a priced lookup failed we counted it
+  # as zero, so the total is an UNDERCOUNT and must not claim otherwise — a cost
+  # figure that quietly omits a line item is worse than no figure at all.
+  local covers="droplets + block storage"
+  [ "$dj_rc"   -ne 0 ] && covers="block storage only ${R}(droplets unreadable)${X}"
+  [ "$vols_rc" -ne 0 ] && covers="droplets only ${R}(block storage unreadable)${X}"
+  if [ "$dj_rc" -ne 0 ] && [ "$vols_rc" -ne 0 ]; then covers="${R}nothing — both priced lookups failed${X}"; fi
+
+  printf "\n  ${BD}estimated  ~\$%s/mo${X}  ${DIM}· %s${X}\n" \
+    "$(awk -v t="$total" 'BEGIN{printf (t==int(t))?"%d":"%.2f", t}')" "$covers"
+  printf "  ${DIM}Apps, databases, load balancers, snapshots, backups, and bandwidth are not\n"
+  printf "  included. A glance, not an invoice — '%s help survey' explains why.${X}\n\n" "$PROG"
+}
 
 # ── help ──────────────────────────────────────────────────────────────────────
 help_ls(){
@@ -670,6 +849,24 @@ help_install(){
   printf "  ${DIM}If doctl is authenticated, your SSH-key fingerprints are prefilled (they are\n"
   printf "  public identifiers, not secrets, and never leave this machine). The file is\n"
   printf "  written 0600 and holds no credentials — doctl owns your DO token.${X}\n\n"
+}
+help_survey(){
+  printf "\n  ${BD}$PROG survey${X} [--json]\n\n"
+  printf "  The whole-estate view: droplets, App Platform apps, volumes, firewalls, and a\n"
+  printf "  count of reserved IPs, databases, load balancers, and Kubernetes clusters —\n"
+  printf "  with an estimated monthly cost. ${DIM}(network — several API calls)${X}\n\n"
+  printf "  ${BD}Options${X}\n"
+  printf "    --json   one machine-readable object instead of the view\n\n"
+  printf "  ${BD}What the cost figure covers${X}\n"
+  printf "    ${G}included${X}  droplets ${DIM}(doctl's list price for each size)${X}\n"
+  printf "    ${G}included${X}  block storage ${DIM}(volume GiB × \$%s, set by SLEIPNIR_VOLUME_PRICE_GIB)${X}\n" "$VOLUME_PRICE_GIB"
+  printf "    ${Y}excluded${X}  App Platform, databases, load balancers, Kubernetes\n"
+  printf "    ${Y}excluded${X}  snapshots, backups, bandwidth overage, reserved-IP idle charges\n\n"
+  printf "  ${DIM}It is a glance, not an invoice — use it to notice that something is running,\n"
+  printf "  not to reconcile a bill. Volumes are the one line sleipnir cannot read a price\n"
+  printf "  for, so that rate lives in config where you can correct it.${X}\n\n"
+  printf "  ${DIM}Spaces buckets are not listed: doctl exposes only 'spaces keys', with no\n"
+  printf "  bucket listing, and sleipnir does not call the DO API directly to fill gaps.${X}\n\n"
 }
 help_apps(){
   printf "\n  ${BD}$PROG apps${X} [--json]\n\n"
@@ -723,7 +920,7 @@ usage(){
   printf "    ${BD}ls${X} [--tag X] [--region Y]   droplets — name · IP · region · size · \$/mo · tags\n"
   printf "    ${BD}ip${X} <name>                   print a droplet's public IPv4\n"
   printf "    ${BD}ssh${X} <name> [-- <args>]      ssh into a droplet by name\n"
-  printf "    ${DIM}survey                      whole-estate view + cost tally  (not built yet)${X}\n"
+  printf "    ${BD}survey${X}                      whole-estate view + cost tally\n"
   printf "    ${BD}apps${X}                        App Platform apps — phase, age, live URL\n"
   printf "    ${BD}deploys${X} <app>               recent deployments for an app\n"
   printf "    ${BD}logs${X} <app> [component]      read an app's logs ${DIM}(-f to follow)${X}\n\n"
@@ -740,6 +937,7 @@ cmd_help(){
     ls)      help_ls;;
     ip)      help_ip;;
     ssh)     help_ssh;;
+    survey)  help_survey;;
     apps)    help_apps;;
     deploys) help_deploys;;
     logs)    help_logs;;

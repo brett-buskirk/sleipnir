@@ -26,6 +26,11 @@ SLEIPNIR_SSH_KEYS=""
 # Default tag(s) sleipnir stamps on resources it creates (v2+)
 SLEIPNIR_TAGS="sleipnir"
 
+# Block-storage price per GiB/month, used by `sleipnir survey` to cost volumes.
+# doctl reports a droplet's price but not a volume's, so this is the one number
+# sleipnir has to be told. Correct it if DigitalOcean's pricing moves.
+SLEIPNIR_VOLUME_PRICE_GIB="0.10"
+
 # Droplet profiles for `sleipnir summon <name> --profile <p>` (v2+).
 # Example — a throwaway test box mirroring the ansible-baseline harness:
 # SLEIPNIR_PROFILE_test="--image debian-13-x64 --size s-1vcpu-1gb --region nyc3 --tag-name test"

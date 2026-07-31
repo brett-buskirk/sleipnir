@@ -16,6 +16,7 @@ For the narrative version see the [README](README.md); for per-command detail in
 | [`ls`](#ls) | Droplet table — name · IP · region · size · $/mo · status · tags | `--tag`, `--region`, `--json` |
 | [`ip`](#ip-name) | Print just a droplet's public IPv4 | |
 | [`ssh`](#ssh-name) | SSH into a droplet by name | `-u`, `-i`, `-- <ssh args>` |
+| [`survey`](#survey) | Whole-estate view + estimated monthly cost | `--json` |
 | [`apps`](#apps) | App Platform apps — phase, age, components, live URL | `--json` |
 | [`deploys`](#deploys-app) | Recent deployments for an app | `-n`, `--json` |
 | [`logs`](#logs-app-component) | Read an app's logs | `-f`, `-n`, `--type` |
@@ -24,7 +25,7 @@ For the narrative version see the [README](README.md); for per-command detail in
 | [`help`](#help--version) | The menu, or detail for one command | |
 | `version` | Print the version | |
 
-Not built yet — see the [ROADMAP](ROADMAP.md): `survey`.
+That is all of v1. Next up is v2 (safe composites — `summon`, `open`); see the [ROADMAP](ROADMAP.md).
 
 ---
 
@@ -59,6 +60,7 @@ Precedence is **`SLEIPNIR_*` environment variables > the config file > built-in 
 | `SLEIPNIR_SSH_IDENTITY` | *(unset)* | `ssh` — local private key, passed to `ssh -i` |
 | `SLEIPNIR_SSH_KEYS` | *(unset)* | public-key **fingerprints** for doctl to attach on create (v2) |
 | `SLEIPNIR_TAGS` | `sleipnir` | default tags on created resources (v2) |
+| `SLEIPNIR_VOLUME_PRICE_GIB` | `0.10` | `survey` — block-storage price per GiB/month |
 
 > `SLEIPNIR_SSH_IDENTITY` and `SLEIPNIR_SSH_KEYS` are **different things**: the first is a private key
 > file on this machine that `ssh` uses to log in; the second is a list of public-key fingerprints
@@ -157,6 +159,80 @@ is an error rather than a guess.
 > the hostname, so `ssh host -L 8080:localhost:80` really does set up the forward — while a *remote
 > command* only works in that position. Putting everything after the host is what lets one `--` slot
 > serve both.
+
+---
+
+## `survey`
+
+The whole-estate view: droplets, App Platform apps, volumes, and firewalls in detail, plus a count of
+reserved IPs, databases, load balancers, and Kubernetes clusters — with an estimated monthly cost.
+*(network — several API calls)*
+
+```sh
+sleipnir survey
+sleipnir survey --json
+```
+
+```console
+$ sleipnir survey
+
+  survey  · Brett Buskirk LLC · context brett
+  (network — several API calls)
+
+  droplets         2  ~$42/mo
+    rootroute-staging    64.225.22.218    nyc3   s-2vcpu-2gb     $18/mo  active
+    vor-analytics        165.227.123.156  nyc3   s-2vcpu-4gb     $24/mo  active
+
+  apps             3  (App Platform — not costed below)
+    brett-buskirk-dev    ACTIVE       22m  https://brett-buskirk.dev
+    day-one              ACTIVE        1d  https://dayone-sim.app
+    rc-journey           ACTIVE        1d  https://rcjourney.cloud
+
+  volumes          1  50 GiB · ~$5/mo
+    vor-analytics-data      50 GiB  nyc3    → vor-analytics
+
+  firewalls        2
+    vor-analytics-firewall       succeeded  1 droplet
+    rootroute-staging-firewall   succeeded  1 droplet
+
+  reserved IPs     none
+  databases        none
+  load balancers   none
+  kubernetes       none
+  Spaces           not listable via doctl
+
+  estimated  ~$47/mo  · droplets + block storage
+```
+
+### What the cost figure covers
+
+| | |
+|-|-|
+| ✅ included | Droplets — doctl's list price for each size |
+| ✅ included | Block storage — volume GiB × `SLEIPNIR_VOLUME_PRICE_GIB` (default `$0.10`) |
+| ❌ excluded | App Platform, databases, load balancers, Kubernetes |
+| ❌ excluded | Snapshots, backups, bandwidth overage, reserved-IP idle charges |
+
+It is a glance, not an invoice — use it to notice that something is *running*, not to reconcile a bill.
+Volumes are the one line sleipnir cannot read a price for (doctl reports a droplet's price but not a
+volume's), which is why that rate lives in config where you can correct it.
+
+### "none" vs "unknown"
+
+These mean different things and the view never conflates them:
+
+- **`none`** — doctl answered, and there are genuinely no such resources.
+- **`unknown`** — the lookup *failed*. Nothing is being claimed about what exists.
+
+If a **priced** lookup fails, the total is an undercount and the footer says so explicitly rather than
+quietly dropping a line item:
+
+```console
+  estimated  ~$42/mo  · droplets only (block storage unreadable)
+```
+
+**Spaces** are absent by design: doctl exposes only `spaces keys`, with no bucket listing, and sleipnir
+does not call the DO API directly to fill gaps in doctl's coverage.
 
 ---
 
