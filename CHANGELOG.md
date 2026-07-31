@@ -7,6 +7,13 @@ All notable changes to sleipnir are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- `apps` — App Platform table (name · phase · time since last deploy · components · region · tier ·
+  live URL), with `--json`.
+- `deploys <app>` — recent deployments, newest first, with `-n` and `--json`. Takes an app *name*;
+  doctl's own `list-deployments` requires a UUID.
+- `logs <app> [component]` — read an app's logs with `-f` / `-n` / `--type`. Defaults to **build** logs
+  for apps with no runtime component, because doctl's `run` default hangs on a websocket that never
+  delivers for a static site.
 - `ssh <name>` — resolve a droplet name to its IP and connect as the configured user, with `-u`/`-i`
   overrides and everything after `--` passed to `ssh` untouched. Prints the target (and the account it
   belongs to) on stderr before handing over the terminal.
