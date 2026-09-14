@@ -16,7 +16,7 @@ Sleipnir lives in Brett's estate (`~/github-repos`), so two higher-level files a
 everything here** — don't restate or override them:
 - `/etc/claude-code/CLAUDE.md` — the machine-wide **managed policy** (safety, review, governance floors).
 - `~/github-repos/CLAUDE.md` — the **Estate Steward manual**; its *Issue & PR conventions* apply to you
-  directly (assignee `brett-buskirk`, labels, the Estate board **#17**).
+  directly (assignee `brett-buskirk`, labels, linked in Linear (per the estate manual)).
 
 The non-negotiables in short: **branch → PR → stop and let Brett merge** (never self-merge, never commit to
 `main`); signed commits ending `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`; never commit
